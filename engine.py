@@ -119,3 +119,13 @@ class Game:
     @property
     def vocab_size(self) -> int:
         return len(self.vocab) + 1
+
+    def hint(self, best_rank: int | None) -> tuple[str, int]:
+        """Слово, ближче за найкращу здогадку гравця (але не відповідь)."""
+        if best_rank is None or best_rank <= 3:
+            target = 50
+        else:
+            target = max(2, best_rank // 2)
+        order = np.argsort(-self._vocab_sims)
+        idx = max(0, min(len(self.vocab) - 1, target - 2))
+        return self.vocab[order[idx]], idx + 2
