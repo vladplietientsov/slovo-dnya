@@ -1,0 +1,12 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# згенеровані / завантажувані дані
+uk_50k.txt
+data/vocab.txt
+data/*.npy
+
+# секрети
+.env
