@@ -2,6 +2,8 @@
 
 Налаштування через .env:
   TELEGRAM_BOT_TOKEN=...       # токен від @BotFather (обовʼязково)
+  SECRET_SALT=...              # випадковий рядок, від нього залежить слово дня (обовʼязково)
+  ALLOWED_USERS=111,222        # Telegram ID гравців через кому
   ANNOUNCE_HOUR=9              # о котрій оголошувати нове слово (0-23)
   TIMEZONE=Europe/Kyiv        # часовий пояс
 
@@ -11,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import html
 import logging
 import os
 from datetime import date
@@ -21,9 +24,11 @@ from telegram import Update
 from telegram.constants import ChatAction
 from telegram.ext import (
     Application,
+    ApplicationHandlerStop,
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 
@@ -37,6 +42,9 @@ log = logging.getLogger("slovo")
 
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+ALLOWED_USERS = {
+    int(x) for x in os.getenv("ALLOWED_USERS", "").replace(" ", "").split(",") if x
+}
 ANNOUNCE_HOUR = int(os.getenv("ANNOUNCE_HOUR", "9"))
 TZ = ZoneInfo(os.getenv("TIMEZONE", "Europe/Kyiv"))
 
@@ -62,6 +70,20 @@ async def get_game(day: date) -> engine.Game:
 def player_name(update: Update) -> str:
     u = update.effective_user
     return u.full_name or u.username or "Гравець"
+
+
+async def guard(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Пропускає далі лише гравців зі списку ALLOWED_USERS."""
+    user = update.effective_user
+    if user and user.id in ALLOWED_USERS:
+        return
+    if user:
+        log.warning("Чужий користувач %s (%s)", user.id, user.full_name)
+        if update.message and update.effective_chat.type == "private":
+            await update.message.reply_html(
+                f"🔒 Це приватна гра. Твій Telegram ID: <code>{user.id}</code>"
+            )
+    raise ApplicationHandlerStop
 
 
 # ---------------------------------------------------------------- команди
@@ -103,7 +125,7 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         medal = medals[i] if i < len(medals) else "  "
         best = f", краще {s.best_attempts} спроб" if s.best_attempts else ""
         lines.append(
-            f"{medal} <b>{s.name}</b>: {s.wins} перемог, "
+            f"{medal} <b>{html.escape(s.name)}</b>:{s.wins} перемог, "
             f"серія {s.streak}🔥{best}"
         )
     await update.message.reply_html("\n".join(lines))
@@ -121,7 +143,7 @@ async def cmd_hint(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     best_rank = guesses[0][1] if guesses else None
     word, rank = game.hint(best_rank)
     await update.message.reply_html(
-        f"💡 Підказка: спробуй асоціації до <b>«{word}»</b> (це слово на позиції {rank})."
+        f"💡 Підказка: спробуй асоціації до <b>«{html.escape(word)}»</b> (це слово на позиції {rank})."
     )
 
 
@@ -137,7 +159,7 @@ async def cmd_giveup(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         attempts=storage.attempts_count(uid, day),
     )
     await update.message.reply_html(
-        f"Загадане слово було: <b>{game.secret}</b>. Завтра нове! 🎯"
+        f"Загадане слово було: <b>{html.escape(game.secret)}</b>. Завтра нове! 🎯"
     )
 
 
@@ -179,16 +201,16 @@ async def on_guess(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         storage.set_result(uid, day, solved=True, gave_up=False, attempts=attempts)
         stats = storage.get_stats(uid, day)
         await update.message.reply_html(
-            f"{g.emoji} <b>{g.lemma}</b> — ВГАДАВ! 🎉\n"
+            f"{g.emoji} <b>{html.escape(g.lemma)}</b> — ВГАДАВ! 🎉\n"
             f"Спроб: {attempts}. Серія: {stats.streak}🔥"
         )
         return
 
-    note = f" (як «{g.lemma}»)" if g.lemma != text.lower() else ""
+    note = f" (як «{html.escape(g.lemma)}»)" if g.lemma != text.lower() else ""
     guesses = storage.get_day_guesses(uid, day)
-    best = "  ".join(f"{w}={r}" for w, r in guesses[:3])
+    best = "  ".join(f"{html.escape(w)}={r}" for w, r in guesses[:3])
     await update.message.reply_html(
-        f"{g.emoji} <b>{text}</b>{note}: позиція {g.rank}\n"
+        f"{g.emoji} <b>{html.escape(text)}</b>{note}:позиція {g.rank}\n"
         f"<i>найкращі:</i> {best}"
     )
 
@@ -216,9 +238,21 @@ def main() -> None:
             "Немає TELEGRAM_BOT_TOKEN. Створи файл .env і поклади туди токен "
             "від @BotFather (див. .env.example)."
         )
+    if not os.getenv("SECRET_SALT"):
+        raise SystemExit(
+            "Немає SECRET_SALT у .env — без неї слово дня можна вирахувати "
+            "з публічного репозиторію. Згенеруй: "
+            'python -c "import secrets; print(secrets.token_hex(32))"'
+        )
+    if not ALLOWED_USERS:
+        log.warning(
+            "ALLOWED_USERS порожній — бот нікого не пустить. Напиши боту "
+            "/start, він покаже твій ID, і додай його в .env."
+        )
     storage.init()
 
     app = Application.builder().token(TOKEN).post_init(_post_init).build()
+    app.add_handler(TypeHandler(Update, guard), group=-1)
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("stats", cmd_stats))

@@ -11,6 +11,8 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
+import os
 from dataclasses import dataclass
 from datetime import date
 from functools import lru_cache
@@ -18,6 +20,9 @@ from pathlib import Path
 
 import numpy as np
 import spacy
+from dotenv import load_dotenv
+
+load_dotenv()
 
 ROOT = Path(__file__).parent
 DATA = ROOT / "data"
@@ -61,10 +66,15 @@ def load_secret_words() -> list[str]:
 
 
 def daily_secret(day: date | None = None) -> str:
-    """Детерміноване слово дня — обидва гравці отримують однакове."""
+    """Детерміноване слово дня — обидва гравці отримують однакове.
+
+    Залежить від SECRET_SALT із .env: без неї слово можна вирахувати
+    з публічного репозиторію.
+    """
     day = day or date.today()
     words = load_secret_words()
-    h = hashlib.sha256(day.isoformat().encode()).hexdigest()
+    salt = os.getenv("SECRET_SALT", "").encode()
+    h = hmac.new(salt, day.isoformat().encode(), hashlib.sha256).hexdigest()
     return words[int(h, 16) % len(words)]
 
 
