@@ -38,6 +38,8 @@ import storage
 logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s %(message)s", level=logging.INFO
 )
+# httpx на рівні INFO пише URL запитів, а в ньому токен бота
+logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("slovo")
 
 load_dotenv()
