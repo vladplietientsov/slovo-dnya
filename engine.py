@@ -38,13 +38,51 @@ def _nlp():
     return spacy.load(MODEL)
 
 
+def _norm(word: str) -> str:
+    return word.strip().lower().replace("’", "'")
+
+
 def lemma(word: str) -> str:
     """Початкова форма слова, у нижньому регістрі."""
-    word = word.strip().lower().replace("’", "'")
-    doc = _nlp()(word)
-    if not doc:
-        return word
-    return doc[0].lemma_.lower().replace("’", "'")
+    return lemmas([word])[0][0]
+
+
+@lru_cache(maxsize=1)
+def _morph():
+    import pymorphy3
+
+    return pymorphy3.MorphAnalyzer(lang="uk")
+
+
+def lemmas(words: list[str]) -> list[tuple[str, object]]:
+    """(лема, тег pymorphy3 або None) для кожного слова — пакетом, для словника.
+
+    Та сама логіка, що й у lemma(), тож лема здогадки й лема у словнику
+    завжди збігаються.
+
+    spaCy на окремому слові без контексту часто помиляється з частиною мови
+    й лишає слово як є ("коктейлю", "болоті"), тому основа — pymorphy3,
+    а лема від spaCy лише обирає між кількома розборами ("котів" -> "кіт",
+    а не "коти").
+    """
+    morph = _morph()
+    normed = [_norm(w) for w in words]
+    out = []
+    for w, doc in zip(normed, _nlp().pipe(normed, batch_size=1000)):
+        spacy_lem = _norm(doc[0].lemma_) if doc else w
+        parses = [p for p in morph.parse(w) if morph.word_is_known(p.normal_form)]
+        if not parses:
+            out.append((spacy_lem, None))
+            continue
+        by_form = {p.normal_form: p for p in reversed(parses)}
+        if spacy_lem != w and spacy_lem in by_form:
+            p = by_form[spacy_lem]   # spaCy щось змінив, і pymorphy3 згоден
+        elif w in by_form:
+            p = by_form[w]           # слово вже в початковій формі
+        else:
+            p = parses[0]
+        out.append((p.normal_form, p.tag))
+    return out
 
 
 def _vector(word: str) -> np.ndarray:
@@ -106,12 +144,14 @@ class Game:
         self._secret_vec = _unit(_vector(self.secret))
 
         vocab_path = vocab_path or (DATA / "vocab.txt")
-        vocab = [
+        # dict.fromkeys — прибирає дублікати, зберігаючи порядок
+        vocab = list(dict.fromkeys(
             w.strip()
             for w in vocab_path.read_text(encoding="utf-8").splitlines()
             if w.strip() and w.strip() != self.secret
-        ]
+        ))
         self.vocab = vocab
+        self._index = {w: i for i, w in enumerate(vocab)}
 
         matrix = np.vstack([_unit(_vector(w)) for w in vocab])
         # схожість кожного слова словника із загаданим
@@ -119,9 +159,16 @@ class Game:
 
     def guess(self, word: str) -> Guess:
         lem = lemma(word)
-        if lem == self.secret:
-            return Guess(word=word, lemma=lem, rank=1, similarity=1.0)
-        sim = float(_unit(_vector(lem)) @ self._secret_vec)
+        # друга умова — для слів лише у множині: "сани" pymorphy3 зводить до "сан"
+        if lem == self.secret or _norm(word) == self.secret:
+            return Guess(word=word, lemma=self.secret, rank=1, similarity=1.0)
+        idx = self._index.get(lem)
+        if idx is not None:
+            # беремо вже пораховане число: окремий розрахунок відрізняється
+            # в останніх знаках, і слово могло "обігнати саме себе"
+            sim = float(self._vocab_sims[idx])
+        else:
+            sim = float(_unit(_vector(lem)) @ self._secret_vec)
         # +2: 1 — саме загадане слово, 1 — переводимо кількість ближчих у позицію
         rank = int(np.sum(self._vocab_sims > sim)) + 2
         return Guess(word=word, lemma=lem, rank=rank, similarity=sim)

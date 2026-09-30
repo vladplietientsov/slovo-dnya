@@ -1,6 +1,9 @@
 spacy>=3.8,<3.9
 # українська модель зі floret-векторами та лематизацією
 uk_core_news_md @ https://github.com/explosion/spacy-models/releases/download/uk_core_news_md-3.8.0/uk_core_news_md-3.8.0-py3-none-any.whl
+# морфологічний словник: лематизація в engine.py, відсіювання русизмів у build_data.py
+pymorphy3
+pymorphy3-dicts-uk
 
 # Telegram-бот
 python-telegram-bot[job-queue]~=22.8

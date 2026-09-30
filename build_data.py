@@ -1,7 +1,8 @@
 """Готує словник для рейтингу зі частотного списку uk_50k.txt.
 
 Створює:
-  data/vocab.txt - словник для рейтингу (top-N частотних слів)
+  data/vocab.txt - словник для рейтингу (top-N частотних лем:
+                   одна початкова форма на слово, без русизмів і службових слів)
 
 Список слів для загадування (data/secret_words.txt) вивірений вручну:
 частотний список зібраний із субтитрів і містить багато російських та
@@ -27,6 +28,13 @@ VOCAB_SIZE = 15000
 
 # українські літери + апостроф
 UK_RE = re.compile(r"^[абвгґдеєжзиіїйклмнопрстуфхцчшщьюя'’]+$")
+
+# лишаємо іменники, дієслова, прикметники (теги pymorphy3). Прислівники
+# відкидаємо: серед частотних це здебільшого "так/тут/дуже" і русизми
+# ("конечно", "сюда"), які pymorphy3 не позначає
+KEEP_POS = {"NOUN", "VERB", "INFN", "ADJF", "ADJS"}
+# Dist — русизми/суржик, Slng — сленг, решта — імена власні
+BAD_TAGS = {"Dist", "Slng", "Name", "Surn", "Patr", "Abbr"}
 
 
 def ensure_freq_file() -> None:
@@ -58,13 +66,39 @@ def clean_words() -> list[str]:
     return words
 
 
+def lemmatize_vocab(words: list[str]) -> list[str]:
+    """Зводить слова до лем, прибирає дублікати, русизми й службові слова.
+
+    Порядок частотний: лема стоїть там, де вперше трапилась будь-яка її форма.
+    """
+    import engine
+
+    vocab: list[str] = []
+    seen: set[str] = set()
+    for lem, tag in engine.lemmas(words):
+        if tag is None or lem in seen:  # None — слова немає у словнику pymorphy3
+            continue
+        if tag.POS not in KEEP_POS or BAD_TAGS & tag.grammemes:
+            continue
+        if len(lem) < 3 or not UK_RE.match(lem):
+            continue
+        seen.add(lem)
+        vocab.append(lem)
+    # друга перевірка: лема має лишатися собою, як її лематизує гра.
+    # Інакше ("сказала" -> "сказати") здогадка зведеться до іншого слова
+    # й отримає чужу позицію
+    return [w for w, (lem, _) in zip(vocab, engine.lemmas(vocab)) if lem == w]
+
+
 def main() -> None:
     DATA.mkdir(exist_ok=True)
     ensure_freq_file()
     words = clean_words()
     print(f"Очищено слів: {len(words)}")
 
-    vocab = words[:VOCAB_SIZE]
+    lemmas = lemmatize_vocab(words)
+    print(f"Унікальних лем: {len(lemmas)}")
+    vocab = lemmas[:VOCAB_SIZE]
     (DATA / "vocab.txt").write_text("\n".join(vocab), encoding="utf-8")
     print(f"Словник для рейтингу: {len(vocab)} -> data/vocab.txt")
 
