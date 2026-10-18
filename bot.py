@@ -128,7 +128,7 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         medal = medals[i] if i < len(medals) else "  "
         best = f", краще {s.best_attempts} спроб" if s.best_attempts else ""
         lines.append(
-            f"{medal} <b>{html.escape(s.name)}</b>:{s.wins} перемог, "
+            f"{medal} <b>{html.escape(s.name)}</b>: {s.wins} перемог, "
             f"серія {s.streak}🔥{best}"
         )
     await update.message.reply_html("\n".join(lines))
@@ -213,7 +213,7 @@ async def on_guess(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     guesses = storage.get_day_guesses(uid, day)
     best = "  ".join(f"{html.escape(w)}={r}" for w, r in guesses[:3])
     await update.message.reply_html(
-        f"{g.emoji} <b>{html.escape(text)}</b>{note}:позиція {g.rank}\n"
+        f"{g.emoji} <b>{html.escape(text)}</b>{note}: позиція {g.rank}\n"
         f"<i>найкращі:</i> {best}"
     )
 
