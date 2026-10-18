@@ -44,6 +44,11 @@ SCHEMA = [
         attempts INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (user_id, day)
     )""",
+    # номер поточного раунду дня (0 — перше слово, далі /newword)
+    """CREATE TABLE IF NOT EXISTS rounds (
+        day TEXT PRIMARY KEY,
+        n   INTEGER NOT NULL
+    )""",
 ]
 
 
@@ -131,10 +136,35 @@ def _one(sql: str, params: tuple = ()) -> dict | None:
 
 
 # ---------------------------------------------------------------- операції
+#
+# Стан гравця рахується за раундом. Ключ раунду (колонка day) — дата
+# для першого слова дня і "дата#n" для наступних: старі записи лишаються чинними.
 
 def init() -> None:
     for stmt in SCHEMA:
         _query(stmt)
+
+
+def round_key(day: date, n: int) -> str:
+    return day.isoformat() if n == 0 else f"{day.isoformat()}#{n}"
+
+
+def current_round(day: date) -> int:
+    row = _one("SELECT n FROM rounds WHERE day=?", (day.isoformat(),))
+    return row["n"] if row else 0
+
+
+def set_round(day: date, n: int) -> None:
+    _query(
+        "INSERT INTO rounds(day, n) VALUES(?, ?) "
+        "ON CONFLICT(day) DO UPDATE SET n=excluded.n",
+        (day.isoformat(), n),
+    )
+
+
+def solvers_count(rnd: str) -> int:
+    row = _one("SELECT COUNT(*) n FROM results WHERE day=? AND solved=1", (rnd,))
+    return row["n"]
 
 
 def remember_user(user_id: int, name: str) -> None:
@@ -145,53 +175,53 @@ def remember_user(user_id: int, name: str) -> None:
     )
 
 
-def record_guess(user_id: int, day: date, word: str, lemma: str, rank: int) -> None:
+def record_guess(user_id: int, rnd: str, word: str, lemma: str, rank: int) -> None:
     _query(
         "INSERT INTO guesses(user_id, day, word, lemma, rank) VALUES(?, ?, ?, ?, ?)",
-        (user_id, day.isoformat(), word, lemma, rank),
+        (user_id, rnd, word, lemma, rank),
     )
 
 
-def already_guessed_lemma(user_id: int, day: date, lemma: str) -> int | None:
-    """Позиція, якщо гравець уже пробував цю лему сьогодні, інакше None."""
+def already_guessed_lemma(user_id: int, rnd: str, lemma: str) -> int | None:
+    """Позиція, якщо гравець уже пробував цю лему в раунді, інакше None."""
     row = _one(
         "SELECT rank FROM guesses WHERE user_id=? AND day=? AND lemma=? LIMIT 1",
-        (user_id, day.isoformat(), lemma),
+        (user_id, rnd, lemma),
     )
     return row["rank"] if row else None
 
 
-def get_day_guesses(user_id: int, day: date) -> list[tuple[str, int]]:
+def get_day_guesses(user_id: int, rnd: str) -> list[tuple[str, int]]:
     rows = _query(
         "SELECT lemma, rank FROM guesses WHERE user_id=? AND day=? ORDER BY rank",
-        (user_id, day.isoformat()),
+        (user_id, rnd),
     )
     return [(r["lemma"], r["rank"]) for r in rows]
 
 
-def attempts_count(user_id: int, day: date) -> int:
+def attempts_count(user_id: int, rnd: str) -> int:
     row = _one(
         "SELECT COUNT(*) n FROM guesses WHERE user_id=? AND day=?",
-        (user_id, day.isoformat()),
+        (user_id, rnd),
     )
     return row["n"]
 
 
-def get_result(user_id: int, day: date) -> dict | None:
+def get_result(user_id: int, rnd: str) -> dict | None:
     return _one(
         "SELECT * FROM results WHERE user_id=? AND day=?",
-        (user_id, day.isoformat()),
+        (user_id, rnd),
     )
 
 
-def set_result(user_id: int, day: date, *, solved: bool, gave_up: bool,
+def set_result(user_id: int, rnd: str, *, solved: bool, gave_up: bool,
                attempts: int) -> None:
     _query(
         "INSERT INTO results(user_id, day, solved, gave_up, attempts) "
         "VALUES(?, ?, ?, ?, ?) "
         "ON CONFLICT(user_id, day) DO UPDATE SET "
         "solved=excluded.solved, gave_up=excluded.gave_up, attempts=excluded.attempts",
-        (user_id, day.isoformat(), int(solved), int(gave_up), attempts),
+        (user_id, rnd, int(solved), int(gave_up), attempts),
     )
 
 
@@ -214,14 +244,14 @@ def get_stats(user_id: int, today: date) -> Stats:
         "SELECT day, solved, attempts FROM results WHERE user_id=?",
         (user_id,),
     )
-    solved_days = {r["day"] for r in rows if r["solved"]}
-    wins = len(solved_days)
-    played = len(rows)
-    best = min((r["attempts"] for r in rows if r["solved"]), default=None)
+    solved = [r for r in rows if r["solved"]]
+    # серія — за днями, тож відрізаємо номер раунду ("2026-10-18#2" -> дата)
+    solved_days = {r["day"][:10] for r in solved}
+    best = min((r["attempts"] for r in solved), default=None)
     return Stats(
         name=name,
-        wins=wins,
-        played=played,
+        wins=len(solved),
+        played=len(rows),
         streak=_streak(solved_days, today),
         best_attempts=best,
     )

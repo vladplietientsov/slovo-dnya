@@ -103,8 +103,11 @@ def load_secret_words() -> list[str]:
     ]
 
 
-def daily_secret(day: date | None = None) -> str:
+def daily_secret(day: date | None = None, round_no: int = 0) -> str:
     """Детерміноване слово дня — обидва гравці отримують однакове.
+
+    round_no — номер раунду за день (0 — перше слово, далі /newword).
+    Слова раундів одного дня не повторюються.
 
     Залежить від SECRET_SALT із .env: без неї слово можна вирахувати
     з публічного репозиторію.
@@ -112,8 +115,15 @@ def daily_secret(day: date | None = None) -> str:
     day = day or date.today()
     words = load_secret_words()
     salt = os.getenv("SECRET_SALT", "").encode()
-    h = hmac.new(salt, day.isoformat().encode(), hashlib.sha256).hexdigest()
-    return words[int(h, 16) % len(words)]
+    used: set[str] = set()
+    for n in range(round_no + 1):
+        key = day.isoformat() if n == 0 else f"{day.isoformat()}#{n}"
+        h = hmac.new(salt, key.encode(), hashlib.sha256).hexdigest()
+        i = int(h, 16) % len(words)
+        while words[i] in used:
+            i = (i + 1) % len(words)
+        used.add(words[i])
+    return words[i]
 
 
 @dataclass
@@ -126,7 +136,7 @@ class Guess:
     @property
     def emoji(self) -> str:
         if self.rank == 1:
-            return "🎉"
+            return "🐞"
         if self.rank <= GREEN:
             return "🟢"
         if self.rank <= YELLOW:
