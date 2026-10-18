@@ -4,8 +4,9 @@
   TELEGRAM_BOT_TOKEN=...       # токен від @BotFather (обовʼязково)
   SECRET_SALT=...              # випадковий рядок, від нього залежить слово дня (обовʼязково)
   ALLOWED_USERS=111,222        # Telegram ID гравців через кому
-  ANNOUNCE_HOUR=9              # о котрій оголошувати нове слово (0-23)
   TIMEZONE=Europe/Kyiv        # часовий пояс
+  WEBHOOK_URL=https://...      # адреса сервера; без неї бот сам опитує Telegram
+                               # (на Render підставляється з RENDER_EXTERNAL_URL)
 
 Запуск: python bot.py
 """
@@ -13,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import hashlib
 import html
 import logging
 import os
@@ -47,8 +49,10 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ALLOWED_USERS = {
     int(x) for x in os.getenv("ALLOWED_USERS", "").replace(" ", "").split(",") if x
 }
-ANNOUNCE_HOUR = int(os.getenv("ANNOUNCE_HOUR", "9"))
 TZ = ZoneInfo(os.getenv("TIMEZONE", "Europe/Kyiv"))
+# Render сам задає RENDER_EXTERNAL_URL і PORT
+WEBHOOK_URL = os.getenv("WEBHOOK_URL") or os.getenv("RENDER_EXTERNAL_URL")
+PORT = int(os.getenv("PORT", "8080"))
 
 # кеш готових ігор за днями (побудова важка ~3с, тож раз на день)
 _games: dict[str, engine.Game] = {}
@@ -106,9 +110,6 @@ WELCOME = (
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     storage.remember_user(update.effective_user.id, player_name(update))
-    storage.add_subscriber(
-        update.effective_chat.id, update.effective_user.id, player_name(update)
-    )
     await update.message.reply_html(WELCOME)
 
 
@@ -217,17 +218,6 @@ async def on_guess(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-async def announce(ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    for chat_id in storage.get_subscriber_chats():
-        try:
-            await ctx.bot.send_message(
-                chat_id,
-                "🎯 Нове слово дня загадане! Пишіть здогадки.",
-            )
-        except Exception as e:  # чат міг заблокувати бота
-            log.warning("Не вдалося написати %s: %s", chat_id, e)
-
-
 async def _post_init(app: Application) -> None:
     log.info("Прогріваю модель...")
     await get_game(today())
@@ -262,12 +252,22 @@ def main() -> None:
     app.add_handler(CommandHandler("giveup", cmd_giveup))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_guess))
 
-    app.job_queue.run_daily(
-        announce, time=dt.time(hour=ANNOUNCE_HOUR, minute=0, tzinfo=TZ)
-    )
-
-    log.info("Бот запущений. Оголошення о %02d:00 (%s).", ANNOUNCE_HOUR, TZ)
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    if WEBHOOK_URL:
+        # хостинг, що засинає: Telegram сам будить сервер запитом на вебхук.
+        # secret_token — щоб сторонні не могли слати боту фальшиві оновлення
+        secret = hashlib.sha256(f"webhook:{TOKEN}".encode()).hexdigest()
+        log.info("Бот запущений на вебхуку (%s).", TZ)
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path="telegram",
+            webhook_url=f"{WEBHOOK_URL.rstrip('/')}/telegram",
+            secret_token=secret,
+            allowed_updates=Update.ALL_TYPES,
+        )
+    else:
+        log.info("Бот запущений (%s).", TZ)
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":

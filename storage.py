@@ -1,41 +1,50 @@
-"""Сховище стану гри на SQLite: підписники, здогадки, результати, серії."""
+"""Сховище стану гри: гравці, здогадки, результати, серії.
+
+Два режими:
+  * локально — файл SQLite data/game.db;
+  * на хостингу — база Turso (та сама SQLite, але в хмарі), якщо в .env
+    задані TURSO_DATABASE_URL і TURSO_AUTH_TOKEN. Диск безкоштовного Render
+    стирається при кожному перезапуску, тож локальний файл там не вижив би.
+"""
 from __future__ import annotations
 
+import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent / "data" / "game.db"
+import httpx
+from dotenv import load_dotenv
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS subscribers (
-    chat_id    INTEGER PRIMARY KEY,
-    user_id    INTEGER NOT NULL,
-    name       TEXT,
-    created_ts TEXT DEFAULT (datetime('now'))
-);
-CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY,
-    name    TEXT
-);
-CREATE TABLE IF NOT EXISTS guesses (
-    user_id INTEGER NOT NULL,
-    day     TEXT    NOT NULL,
-    word    TEXT    NOT NULL,
-    lemma   TEXT    NOT NULL,
-    rank    INTEGER NOT NULL,
-    ts      TEXT DEFAULT (datetime('now'))
-);
-CREATE TABLE IF NOT EXISTS results (
-    user_id  INTEGER NOT NULL,
-    day      TEXT    NOT NULL,
-    solved   INTEGER NOT NULL DEFAULT 0,
-    gave_up  INTEGER NOT NULL DEFAULT 0,
-    attempts INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (user_id, day)
-);
-"""
+load_dotenv()
+
+DB_PATH = Path(__file__).parent / "data" / "game.db"
+TURSO_URL = os.getenv("TURSO_DATABASE_URL", "").replace("libsql://", "https://")
+TURSO_TOKEN = os.getenv("TURSO_AUTH_TOKEN", "")
+
+SCHEMA = [
+    """CREATE TABLE IF NOT EXISTS users (
+        user_id INTEGER PRIMARY KEY,
+        name    TEXT
+    )""",
+    """CREATE TABLE IF NOT EXISTS guesses (
+        user_id INTEGER NOT NULL,
+        day     TEXT    NOT NULL,
+        word    TEXT    NOT NULL,
+        lemma   TEXT    NOT NULL,
+        rank    INTEGER NOT NULL,
+        ts      TEXT DEFAULT (datetime('now'))
+    )""",
+    """CREATE TABLE IF NOT EXISTS results (
+        user_id  INTEGER NOT NULL,
+        day      TEXT    NOT NULL,
+        solved   INTEGER NOT NULL DEFAULT 0,
+        gave_up  INTEGER NOT NULL DEFAULT 0,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (user_id, day)
+    )""",
+]
 
 
 @dataclass
@@ -47,95 +56,143 @@ class Stats:
     best_attempts: int | None
 
 
-def _conn() -> sqlite3.Connection:
+# ---------------------------------------------------------------- доступ до БД
+
+def _sqlite_query(sql: str, params: tuple) -> list[dict]:
     DB_PATH.parent.mkdir(exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        with conn:
+            return [dict(r) for r in conn.execute(sql, params)]
+    finally:
+        conn.close()
 
+
+_turso_client: httpx.Client | None = None
+
+
+def _turso_arg(v) -> dict:
+    if v is None:
+        return {"type": "null"}
+    if isinstance(v, bool):
+        v = int(v)
+    if isinstance(v, int):
+        return {"type": "integer", "value": str(v)}  # Turso хоче цілі як рядок
+    if isinstance(v, float):
+        return {"type": "float", "value": v}
+    return {"type": "text", "value": str(v)}
+
+
+def _turso_value(v: dict):
+    if v["type"] == "integer":
+        return int(v["value"])
+    if v["type"] == "null":
+        return None
+    return v["value"]
+
+
+def _turso_query(sql: str, params: tuple) -> list[dict]:
+    """Запит до Turso через HTTP API (https://docs.turso.tech/sdk/http)."""
+    global _turso_client
+    if _turso_client is None:
+        _turso_client = httpx.Client(
+            base_url=TURSO_URL,
+            headers={"Authorization": f"Bearer {TURSO_TOKEN}"},
+            timeout=15,
+        )
+    body = {"requests": [
+        {"type": "execute",
+         "stmt": {"sql": sql, "args": [_turso_arg(p) for p in params]}},
+        {"type": "close"},
+    ]}
+    resp = _turso_client.post("/v2/pipeline", json=body)
+    resp.raise_for_status()
+    first = resp.json()["results"][0]
+    if first["type"] != "ok":
+        raise RuntimeError(f"Turso: {first.get('error')}")
+    result = first["response"]["result"]
+    cols = [c["name"] for c in result["cols"]]
+    return [
+        {c: _turso_value(v) for c, v in zip(cols, row)}
+        for row in result["rows"]
+    ]
+
+
+def _query(sql: str, params: tuple = ()) -> list[dict]:
+    if TURSO_URL:
+        return _turso_query(sql, params)
+    return _sqlite_query(sql, params)
+
+
+def _one(sql: str, params: tuple = ()) -> dict | None:
+    rows = _query(sql, params)
+    return rows[0] if rows else None
+
+
+# ---------------------------------------------------------------- операції
 
 def init() -> None:
-    with _conn() as c:
-        c.executescript(SCHEMA)
+    for stmt in SCHEMA:
+        _query(stmt)
 
 
 def remember_user(user_id: int, name: str) -> None:
-    with _conn() as c:
-        c.execute(
-            "INSERT INTO users(user_id, name) VALUES(?, ?) "
-            "ON CONFLICT(user_id) DO UPDATE SET name=excluded.name",
-            (user_id, name),
-        )
-
-
-def add_subscriber(chat_id: int, user_id: int, name: str) -> None:
-    with _conn() as c:
-        c.execute(
-            "INSERT INTO subscribers(chat_id, user_id, name) VALUES(?, ?, ?) "
-            "ON CONFLICT(chat_id) DO UPDATE SET name=excluded.name",
-            (chat_id, user_id, name),
-        )
-
-
-def get_subscriber_chats() -> list[int]:
-    with _conn() as c:
-        return [r["chat_id"] for r in c.execute("SELECT chat_id FROM subscribers")]
+    _query(
+        "INSERT INTO users(user_id, name) VALUES(?, ?) "
+        "ON CONFLICT(user_id) DO UPDATE SET name=excluded.name",
+        (user_id, name),
+    )
 
 
 def record_guess(user_id: int, day: date, word: str, lemma: str, rank: int) -> None:
-    with _conn() as c:
-        c.execute(
-            "INSERT INTO guesses(user_id, day, word, lemma, rank) VALUES(?, ?, ?, ?, ?)",
-            (user_id, day.isoformat(), word, lemma, rank),
-        )
+    _query(
+        "INSERT INTO guesses(user_id, day, word, lemma, rank) VALUES(?, ?, ?, ?, ?)",
+        (user_id, day.isoformat(), word, lemma, rank),
+    )
 
 
 def already_guessed_lemma(user_id: int, day: date, lemma: str) -> int | None:
     """Позиція, якщо гравець уже пробував цю лему сьогодні, інакше None."""
-    with _conn() as c:
-        row = c.execute(
-            "SELECT rank FROM guesses WHERE user_id=? AND day=? AND lemma=? LIMIT 1",
-            (user_id, day.isoformat(), lemma),
-        ).fetchone()
-        return row["rank"] if row else None
+    row = _one(
+        "SELECT rank FROM guesses WHERE user_id=? AND day=? AND lemma=? LIMIT 1",
+        (user_id, day.isoformat(), lemma),
+    )
+    return row["rank"] if row else None
 
 
 def get_day_guesses(user_id: int, day: date) -> list[tuple[str, int]]:
-    with _conn() as c:
-        rows = c.execute(
-            "SELECT lemma, rank FROM guesses WHERE user_id=? AND day=? ORDER BY rank",
-            (user_id, day.isoformat()),
-        ).fetchall()
-        return [(r["lemma"], r["rank"]) for r in rows]
+    rows = _query(
+        "SELECT lemma, rank FROM guesses WHERE user_id=? AND day=? ORDER BY rank",
+        (user_id, day.isoformat()),
+    )
+    return [(r["lemma"], r["rank"]) for r in rows]
 
 
 def attempts_count(user_id: int, day: date) -> int:
-    with _conn() as c:
-        row = c.execute(
-            "SELECT COUNT(*) n FROM guesses WHERE user_id=? AND day=?",
-            (user_id, day.isoformat()),
-        ).fetchone()
-        return row["n"]
+    row = _one(
+        "SELECT COUNT(*) n FROM guesses WHERE user_id=? AND day=?",
+        (user_id, day.isoformat()),
+    )
+    return row["n"]
 
 
-def get_result(user_id: int, day: date) -> sqlite3.Row | None:
-    with _conn() as c:
-        return c.execute(
-            "SELECT * FROM results WHERE user_id=? AND day=?",
-            (user_id, day.isoformat()),
-        ).fetchone()
+def get_result(user_id: int, day: date) -> dict | None:
+    return _one(
+        "SELECT * FROM results WHERE user_id=? AND day=?",
+        (user_id, day.isoformat()),
+    )
 
 
 def set_result(user_id: int, day: date, *, solved: bool, gave_up: bool,
                attempts: int) -> None:
-    with _conn() as c:
-        c.execute(
-            "INSERT INTO results(user_id, day, solved, gave_up, attempts) "
-            "VALUES(?, ?, ?, ?, ?) "
-            "ON CONFLICT(user_id, day) DO UPDATE SET "
-            "solved=excluded.solved, gave_up=excluded.gave_up, attempts=excluded.attempts",
-            (user_id, day.isoformat(), int(solved), int(gave_up), attempts),
-        )
+    _query(
+        "INSERT INTO results(user_id, day, solved, gave_up, attempts) "
+        "VALUES(?, ?, ?, ?, ?) "
+        "ON CONFLICT(user_id, day) DO UPDATE SET "
+        "solved=excluded.solved, gave_up=excluded.gave_up, attempts=excluded.attempts",
+        (user_id, day.isoformat(), int(solved), int(gave_up), attempts),
+    )
 
 
 def _streak(solved_days: set[str], today: date) -> int:
@@ -151,15 +208,12 @@ def _streak(solved_days: set[str], today: date) -> int:
 
 
 def get_stats(user_id: int, today: date) -> Stats:
-    with _conn() as c:
-        name_row = c.execute(
-            "SELECT name FROM users WHERE user_id=?", (user_id,)
-        ).fetchone()
-        name = name_row["name"] if name_row else "Гравець"
-        rows = c.execute(
-            "SELECT day, solved, attempts FROM results WHERE user_id=?",
-            (user_id,),
-        ).fetchall()
+    name_row = _one("SELECT name FROM users WHERE user_id=?", (user_id,))
+    name = name_row["name"] if name_row else "Гравець"
+    rows = _query(
+        "SELECT day, solved, attempts FROM results WHERE user_id=?",
+        (user_id,),
+    )
     solved_days = {r["day"] for r in rows if r["solved"]}
     wins = len(solved_days)
     played = len(rows)
@@ -174,8 +228,7 @@ def get_stats(user_id: int, today: date) -> Stats:
 
 
 def all_player_ids() -> list[int]:
-    with _conn() as c:
-        return [r["user_id"] for r in c.execute("SELECT user_id FROM users")]
+    return [r["user_id"] for r in _query("SELECT user_id FROM users")]
 
 
 def scoreboard(today: date) -> list[Stats]:

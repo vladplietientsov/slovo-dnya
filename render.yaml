@@ -1,0 +1,25 @@
+# Опис сервісу для Render (Blueprint): New → Blueprint → вибрати цей репозиторій
+services:
+  - type: web
+    name: slovo-dnya
+    runtime: python
+    plan: free
+    region: frankfurt
+    buildCommand: pip install -r requirements.txt && python build_data.py
+    startCommand: python bot.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.10
+      - key: TIMEZONE
+        value: Europe/Kyiv
+      # секрети — Render попросить ввести їх при створенні
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: SECRET_SALT
+        sync: false
+      - key: ALLOWED_USERS
+        sync: false
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false

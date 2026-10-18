@@ -6,5 +6,6 @@ pymorphy3
 pymorphy3-dicts-uk
 
 # Telegram-бот
-python-telegram-bot[job-queue]~=22.8
+# webhooks — вбудований веб-сервер для роботи на Render
+python-telegram-bot[webhooks]~=22.8
 python-dotenv>=1.0
