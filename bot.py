@@ -54,8 +54,8 @@ TZ = ZoneInfo(os.getenv("TIMEZONE", "Europe/Kyiv"))
 WEBHOOK_URL = os.getenv("WEBHOOK_URL") or os.getenv("RENDER_EXTERNAL_URL")
 PORT = int(os.getenv("PORT", "8080"))
 
-# скільки гравців мають вгадати слово, щоб відкрився /newword
-SOLVERS_FOR_NEW_ROUND = 2
+# скільки гравців мають завершити слово (вгадати чи здатися), щоб відкрився /newword
+FINISHED_FOR_NEW_ROUND = 2
 
 # кеш готових ігор за раундами (побудова важка ~3с)
 _games: dict[str, engine.Game] = {}
@@ -119,7 +119,7 @@ WELCOME = (
     "Команди:\n"
     "/hint — підказка\n"
     "/stats — статистика й таблиця\n"
-    "/newword — нове слово, коли двоє вже вгадали\n"
+    "/newword — нове слово, коли двоє вже вгадали чи здались\n"
     "/giveup — здатися й дізнатися слово\n"
     "/help — довідка"
 )
@@ -182,18 +182,18 @@ async def cmd_giveup(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
     await update.message.reply_html(
         f"Загадане слово було: <b>{html.escape(game.secret)}</b>. "
-        "Нове слово — завтра або через /newword, коли двоє вгадають 🎯"
+        "Нове слово — завтра або через /newword, коли двоє завершать 🎯"
     )
 
 
 async def cmd_newword(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     async with _round_lock:
         day, n, rnd = current()
-        solvers = storage.solvers_count(rnd)
-        if solvers < SOLVERS_FOR_NEW_ROUND:
+        finished = storage.finished_count(rnd)
+        if finished < FINISHED_FOR_NEW_ROUND:
             await update.message.reply_text(
-                f"Нове слово відкриється, коли поточне вгадають "
-                f"{SOLVERS_FOR_NEW_ROUND} гравці (зараз: {solvers})."
+                f"Нове слово відкриється, коли поточне вгадають або здадуться "
+                f"{FINISHED_FOR_NEW_ROUND} гравці (зараз: {finished})."
             )
             return
         await ctx.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
@@ -268,8 +268,8 @@ async def on_guess(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             f"{g.emoji} <b>{html.escape(g.lemma)}</b> — Вгадано! 🐞\n"
             f"Спроб: {attempts}. Серія: {stats.streak}🔥"
         )
-        if storage.solvers_count(rnd) >= SOLVERS_FOR_NEW_ROUND:
-            msg += "\nСлово вже вгадали двоє — /newword відкриє нове."
+        if storage.finished_count(rnd) >= FINISHED_FOR_NEW_ROUND:
+            msg += "\nДвоє вже завершили це слово — /newword відкриє нове."
         await update.message.reply_html(msg)
         return
 

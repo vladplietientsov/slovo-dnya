@@ -25,11 +25,14 @@ storage.set_result(2, td, solved=True, gave_up=False, attempts=3)
 
 # раунди: двоє вгадали -> можна відкрити наступний
 assert storage.current_round(td_date) == 0
-assert storage.solvers_count(td) == 2
+assert storage.finished_count(td) == 2
 storage.set_round(td_date, 1)
 r1 = storage.round_key(td_date, 1)
 assert storage.current_round(td_date) == 1 and r1 == f"{td_date.isoformat()}#1"
-assert storage.solvers_count(r1) == 0 and storage.get_result(1, r1) is None
+assert storage.finished_count(r1) == 0 and storage.get_result(1, r1) is None
+# той, хто здався, теж рахується як завершив
+storage.set_result(1, r1, solved=False, gave_up=True, attempts=2)
+assert storage.finished_count(r1) == 1
 # перемога в другому раунді додає перемогу, але не подовжує серію
 storage.set_result(2, r1, solved=True, gave_up=False, attempts=9)
 s2r = storage.get_stats(2, td_date)

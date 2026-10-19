@@ -162,8 +162,12 @@ def set_round(day: date, n: int) -> None:
     )
 
 
-def solvers_count(rnd: str) -> int:
-    row = _one("SELECT COUNT(*) n FROM results WHERE day=? AND solved=1", (rnd,))
+def finished_count(rnd: str) -> int:
+    """Скільки гравців завершили раунд: вгадали або здалися."""
+    row = _one(
+        "SELECT COUNT(*) n FROM results WHERE day=? AND (solved=1 OR gave_up=1)",
+        (rnd,),
+    )
     return row["n"]
 
 
