@@ -7,6 +7,8 @@ __pycache__/
 uk_50k.txt
 data/vocab.txt
 data/*.npy
+# вектори слів збираються локально з моделі на 1.2 ГБ, тож вони в репо
+!data/vectors.npy
 data/game.db
 
 # секрети

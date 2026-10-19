@@ -57,8 +57,11 @@ def main() -> None:
             print(f"Загадане слово було: {game.secret}")
             return
 
-        attempts += 1
         g = game.guess(raw)
+        if g is None:
+            print(f"Не знаю слова «{raw}», спробу не зараховано.")
+            continue
+        attempts += 1
         history.append(g)
 
         if g.is_win:

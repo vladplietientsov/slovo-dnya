@@ -66,6 +66,21 @@ def clean_words() -> list[str]:
     return words
 
 
+def is_content_lemma(word: str) -> bool:
+    """Слово — початкова форма іменника, дієслова чи прикметника.
+
+    Дивимось усі розбори: "ніж" pymorphy3 першим вважає сполучником,
+    а "свято" прислівником, але це й іменники.
+    """
+    import engine
+
+    return any(
+        p.normal_form == word and p.tag.POS in KEEP_POS
+        and not BAD_TAGS & p.tag.grammemes
+        for p in engine._morph().parse(word)
+    )
+
+
 def lemmatize_vocab(words: list[str]) -> list[str]:
     """Зводить слова до лем, прибирає дублікати, русизми й службові слова.
 
@@ -78,7 +93,7 @@ def lemmatize_vocab(words: list[str]) -> list[str]:
     for lem, tag in engine.lemmas(words):
         if tag is None or lem in seen:  # None — слова немає у словнику pymorphy3
             continue
-        if tag.POS not in KEEP_POS or BAD_TAGS & tag.grammemes:
+        if not is_content_lemma(lem):
             continue
         if len(lem) < 3 or not UK_RE.match(lem):
             continue
@@ -86,8 +101,12 @@ def lemmatize_vocab(words: list[str]) -> list[str]:
         vocab.append(lem)
     # друга перевірка: лема має лишатися собою, як її лематизує гра.
     # Інакше ("сказала" -> "сказати") здогадка зведеться до іншого слова
-    # й отримає чужу позицію
-    return [w for w, (lem, _) in zip(vocab, engine.lemmas(vocab)) if lem == w]
+    # й отримає чужу позицію. І має мати вектор (data/words.txt),
+    # інакше гра його не знає
+    return [
+        w for w, (lem, _) in zip(vocab, engine.lemmas(vocab))
+        if lem == w and engine.is_known(w)
+    ]
 
 
 def main() -> None:

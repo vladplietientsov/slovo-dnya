@@ -248,14 +248,16 @@ async def on_guess(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     await ctx.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
     game = await get_game(day, n)
-    lem = engine.lemma(text)
-
-    prev = storage.already_guessed_lemma(uid, rnd, lem)
-    if prev is not None:
-        await update.message.reply_text(f"«{lem}» уже було — позиція {prev}.")
+    g = game.guess(text)
+    if g is None:
+        await update.message.reply_text(f"Не знаю слова «{text}» 🤔 Спробу не зараховано.")
         return
 
-    g = game.guess(text)
+    prev = storage.already_guessed_lemma(uid, rnd, g.lemma)
+    if prev is not None:
+        await update.message.reply_text(f"«{g.lemma}» уже було — позиція {prev}.")
+        return
+
     storage.record_guess(uid, rnd, text, g.lemma, g.rank)
 
     if g.is_win:

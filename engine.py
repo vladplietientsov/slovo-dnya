@@ -1,8 +1,8 @@
 """Рушій гри «Слово дня» (тип Contexto українською).
 
-Використовує spaCy-модель uk_core_news_md:
-  * лематизація здогадок ("котів" -> "кіт");
-  * floret-вектори (будь-яке слово має вектор, немає "невідомих").
+Лематизація здогадок ("котів" -> "кіт") — spaCy uk_core_news_md і pymorphy3.
+Вектори — fastText cc.uk.300, лише для початкових форм (data/vectors.npy,
+див. build_vectors.py). Слово без вектора гра не знає.
 
 Рейтинг: для загаданого слова рахуємо косинусну схожість усіх слів
 словника, сортуємо. Позиція здогадки = скільки слів ближчі за неї.
@@ -39,12 +39,15 @@ def _nlp():
 
 
 def _norm(word: str) -> str:
-    return word.strip().lower().replace("’", "'")
+    return word.strip().lower().replace("’", "'").replace("ʼ", "'")
 
 
 def lemma(word: str) -> str:
     """Початкова форма слова, у нижньому регістрі."""
     return lemmas([word])[0][0]
+
+
+_NAME_TAGS = {"Name", "Surn", "Patr"}
 
 
 @lru_cache(maxsize=1)
@@ -74,8 +77,18 @@ def lemmas(words: list[str]) -> list[tuple[str, object]]:
         if not parses:
             out.append((spacy_lem, None))
             continue
+        # імена й прізвища pymorphy3 часто ставить першими ("кіт", "король",
+        # "люди" -> "Люда"), і spaCy з ним погоджується; звичайне слово важливіше
+        common = [p for p in parses if not _NAME_TAGS & p.tag.grammemes]
+        parses = common or parses
         by_form = {p.normal_form: p for p in reversed(parses)}
-        if spacy_lem != w and spacy_lem in by_form:
+        own = next((p for p in parses if p.normal_form == w), None)
+        alt = by_form.get(spacy_lem) if spacy_lem != w else None
+        if own is not None and "Pltm" in own.tag and not (alt and "anim" in alt.tag):
+            # лише множина: "сани", а не "сан"; але множина істот —
+            # звичайна: "коти" -> "кіт", а не рідкісне взуття "коти"
+            p = own
+        elif spacy_lem != w and spacy_lem in by_form:
             p = by_form[spacy_lem]   # spaCy щось змінив, і pymorphy3 згоден
         elif w in by_form:
             p = by_form[w]           # слово вже в початковій формі
@@ -85,14 +98,31 @@ def lemmas(words: list[str]) -> list[tuple[str, object]]:
     return out
 
 
+@lru_cache(maxsize=1)
+def _vectors() -> tuple[dict[str, int], np.ndarray]:
+    """{слово: рядок} і матриця одиничних векторів (float16)."""
+    words = (DATA / "words.txt").read_text(encoding="utf-8").splitlines()
+    matrix = np.load(DATA / "vectors.npy")
+    return {w: i for i, w in enumerate(words)}, matrix
+
+
+def is_known(word: str) -> bool:
+    return word in _vectors()[0]
+
+
 def _vector(word: str) -> np.ndarray:
-    v = _nlp().vocab.get_vector(word)
-    return np.asarray(v, dtype=np.float32)
+    index, matrix = _vectors()
+    return matrix[index[word]].astype(np.float32)
 
 
-def _unit(v: np.ndarray) -> np.ndarray:
-    n = np.linalg.norm(v)
-    return v / n if n > 0 else v
+def _g_variants(word: str) -> list[str]:
+    """"гудзик" -> ["ґудзик"]: гравці часто пишуть ґ як г."""
+    return [word[:i] + "ґ" + word[i + 1:] for i, c in enumerate(word) if c == "г"]
+
+
+def _rhymes(a: str, b: str) -> bool:
+    """Спільне закінчення з 3 літер: "брова" / "корова"."""
+    return len(a) >= 3 and len(b) >= 3 and a[-3:] == b[-3:]
 
 
 def load_secret_words() -> list[str]:
@@ -151,26 +181,41 @@ class Guess:
 class Game:
     def __init__(self, secret: str, vocab_path: Path | None = None):
         self.secret = lemma(secret)
-        self._secret_vec = _unit(_vector(self.secret))
+        self._secret_vec = _vector(self.secret)
 
         vocab_path = vocab_path or (DATA / "vocab.txt")
         # dict.fromkeys — прибирає дублікати, зберігаючи порядок
         vocab = list(dict.fromkeys(
             w.strip()
             for w in vocab_path.read_text(encoding="utf-8").splitlines()
-            if w.strip() and w.strip() != self.secret
+            if w.strip() and w.strip() != self.secret and is_known(w.strip())
         ))
         self.vocab = vocab
         self._index = {w: i for i, w in enumerate(vocab)}
 
-        matrix = np.vstack([_unit(_vector(w)) for w in vocab])
+        index, vectors = _vectors()
+        matrix = vectors[[index[w] for w in vocab]].astype(np.float32)
         # схожість кожного слова словника із загаданим
         self._vocab_sims = matrix @ self._secret_vec
 
-    def guess(self, word: str) -> Guess:
-        lem = lemma(word)
-        # друга умова — для слів лише у множині: "сани" pymorphy3 зводить до "сан"
-        if lem == self.secret or _norm(word) == self.secret:
+    def resolve(self, word: str) -> str | None:
+        """Лема здогадки, яку знає гра, або None ("теремоек")."""
+        w = _norm(word)
+        # сама форма — для слів лише у множині: "сани" pymorphy3 зводить до "сан"
+        candidates = [lemma(word), w]
+        for v in _g_variants(w):
+            candidates += [lemma(v), v]
+        for c in candidates:
+            if c == self.secret or is_known(c):
+                return c
+        return None
+
+    def guess(self, word: str) -> Guess | None:
+        """None — слова немає у словнику гри."""
+        lem = self.resolve(word)
+        if lem is None:
+            return None
+        if lem == self.secret:
             return Guess(word=word, lemma=self.secret, rank=1, similarity=1.0)
         idx = self._index.get(lem)
         if idx is not None:
@@ -178,7 +223,7 @@ class Game:
             # в останніх знаках, і слово могло "обігнати саме себе"
             sim = float(self._vocab_sims[idx])
         else:
-            sim = float(_unit(_vector(lem)) @ self._secret_vec)
+            sim = float(_vector(lem) @ self._secret_vec)
         # +2: 1 — саме загадане слово, 1 — переводимо кількість ближчих у позицію
         rank = int(np.sum(self._vocab_sims > sim)) + 2
         return Guess(word=word, lemma=lem, rank=rank, similarity=sim)
@@ -188,11 +233,19 @@ class Game:
         return len(self.vocab) + 1
 
     def hint(self, best_rank: int | None) -> tuple[str, int]:
-        """Слово, ближче за найкращу здогадку гравця (але не відповідь)."""
+        """Слово, ближче за найкращу здогадку гравця (але не відповідь).
+
+        Пропускає слова, що римуються із загаданим: вони не допомагають.
+        """
         if best_rank is None or best_rank <= 3:
             target = 50
         else:
             target = max(2, best_rank // 2)
         order = np.argsort(-self._vocab_sims)
-        idx = max(0, min(len(self.vocab) - 1, target - 2))
-        return self.vocab[order[idx]], idx + 2
+        start = max(0, min(len(self.vocab) - 1, target - 2))
+        # спершу шукаємо ближче до відповіді, потім далі
+        for idx in [*range(start, -1, -1), *range(start + 1, len(order))]:
+            w = self.vocab[order[idx]]
+            if not _rhymes(w, self.secret):
+                return w, idx + 2
+        return self.vocab[order[start]], start + 2
