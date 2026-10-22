@@ -1,14 +1,17 @@
-"""Готує словник для рейтингу зі частотного списку uk_50k.txt.
+"""Готує словник для рейтингу з частотних лем fastText (data/words.txt).
 
 Створює:
-  data/vocab.txt - словник для рейтингу (top-N частотних лем:
-                   одна початкова форма на слово, без русизмів і службових слів)
+  data/vocab.txt - словник для рейтингу: найчастіші іменники, без
+                   зменшувальних форм ("чемоданчик") і хибних лем ("острови")
 
-Список слів для загадування (data/secret_words.txt) вивірений вручну:
-частотний список зібраний із субтитрів і містить багато російських та
-сміттєвих слів, тож для щоденного слова він не годиться.
+Рейтинг будуємо лише з іменників: загадані слова — іменники, і поруч мають
+стояти пов'язані за змістом речі ("годинник" -> "циферблат", "будильник"),
+а не слова, що просто часто трапляються поряд ("кишеньковий", "точний").
+Здогадка-прикметник чи дієслово однаково отримує позицію.
 
-Запуск (один раз): python build_data.py
+Список слів для загадування (data/secret_words.txt) вивірений вручну.
+
+Запуск: python build_data.py
 """
 from __future__ import annotations
 
@@ -17,14 +20,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent
 DATA = ROOT / "data"
-FREQ_FILE = ROOT / "uk_50k.txt"
-FREQ_URL = (
-    "https://raw.githubusercontent.com/hermitdave/FrequencyWords/"
-    "master/content/2018/uk/uk_50k.txt"
-)
 
-# скільки слів беремо у словник для рейтингу
-VOCAB_SIZE = 15000
+# скільки іменників беремо у словник для рейтингу
+VOCAB_SIZE = 12000
 
 # українські літери + апостроф
 UK_RE = re.compile(r"^[абвгґдеєжзиіїйклмнопрстуфхцчшщьюя'’]+$")
@@ -36,34 +34,39 @@ KEEP_POS = {"NOUN", "VERB", "INFN", "ADJF", "ADJS"}
 # Dist — русизми/суржик, Slng — сленг, решта — імена власні
 BAD_TAGS = {"Dist", "Slng", "Name", "Surn", "Patr", "Abbr"}
 
+# зменшувальні суфікси (називний відмінок), довші — першими
+DIM_SUFFIXES = sorted({
+    "ечко", "ечка", "ечок", "очок", "очка", "ичок", "ичка", "ятко", "атко",
+    "енько", "енька", "онька", "чик", "чок", "чка", "чко", "ик", "ок", "ко",
+    "ка", "ець", "це", "ця", "еня", "еня", "ятко", "ище", "ара", "яра", "ька",
+    "уся", "юся", "усь", "юсь", "уня",
+}, key=len, reverse=True)
+# чергування в кінці основи: книжка -> книга, вушко -> вухо
+DIM_ALTERNATIONS = [("ч", "к"), ("ч", "ц"), ("ж", "г"), ("ш", "х"), ("ш", "с")]
+# закінчення основного слова; "ка", "ко", "це" — для подвійних суфіксів:
+# коробочка -> коробка, ліжечко -> ліжко, дзеркальце -> дзеркало
+DIM_ENDINGS = ["", "а", "о", "я", "е", "ь", "ка", "ко", "ок", "це", "ець"]
+# наскільки схожими мають бути вектори слова й основи: відсіює
+# випадкові збіги ("податок" — не "подать"). Хибне спрацювання лише
+# прибирає слово з рейтингу, тож поріг невисокий
+DIM_MIN_SIM = 0.45
+# відмінкова форма іншого слова, яку словник вважає окремим словом:
+# "оленя" -> "олень", "кури" -> "курка"
+FORM_MIN_SIM = 0.55
+# самостійні слова, які pymorphy3 вважає ще й формою частішого
+# ("рот" — родовий від "рота") і які фільтри помилково відкидають
+KEEP_WORDS = {"рот", "пані", "ставка", "струмок", "корінь", "білок"}
+# слова, що стоять близько до всього підряд і засмічують рейтинг
+# ("грудка" була в топ-100 у кожного десятого загаданого)
+NOISE_WORDS = {"грудка", "ступка", "горнятко"}
 
-def ensure_freq_file() -> None:
-    if FREQ_FILE.exists():
-        return
-    import urllib.request
 
-    print(f"Завантажую частотний список: {FREQ_URL}")
-    urllib.request.urlretrieve(FREQ_URL, FREQ_FILE)
-    print(f"Збережено -> {FREQ_FILE.name}")
+def _more_frequent(a: str, b: str) -> bool:
+    """a трапляється частіше за b: data/words.txt іде в частотному порядку."""
+    import engine
 
-
-def clean_words() -> list[str]:
-    words: list[str] = []
-    seen: set[str] = set()
-    for line in FREQ_FILE.read_text(encoding="utf-8").splitlines():
-        parts = line.split()
-        if not parts:
-            continue
-        w = parts[0].strip().lower().replace("’", "'")
-        if len(w) < 3 or len(w) > 18:
-            continue
-        if not UK_RE.match(w):
-            continue
-        if w in seen:
-            continue
-        seen.add(w)
-        words.append(w)
-    return words
+    index = engine._vectors()[0]
+    return a in index and index[a] < index[b]
 
 
 def is_content_lemma(word: str) -> bool:
@@ -81,43 +84,87 @@ def is_content_lemma(word: str) -> bool:
     )
 
 
-def lemmatize_vocab(words: list[str]) -> list[str]:
-    """Зводить слова до лем, прибирає дублікати, русизми й службові слова.
-
-    Порядок частотний: лема стоїть там, де вперше трапилась будь-яка її форма.
-    """
+def is_plain_noun(word: str) -> bool:
+    """Іменник, а не прикметник у ролі іменника ("рудий", "скажений")."""
     import engine
 
+    parses = engine._morph().parse(word)
+    return (
+        any(p.normal_form == word and p.tag.POS == "NOUN"
+            and not BAD_TAGS & p.tag.grammemes for p in parses)
+        # і не форма частішого прикметника: "солона", "хижа" (але "дорога")
+        and not any(p.tag.POS in {"ADJF", "ADJS"}
+                    and (p.normal_form == word or _more_frequent(p.normal_form, word))
+                    for p in parses)
+    )
+
+
+def is_other_form(word: str) -> bool:
+    """Форма іншого слова з тим самим змістом: "оленя" (олень), "кури" (курка)."""
+    import engine
+
+    vec = engine._vector(word)
+    return any(
+        p.normal_form != word and p.tag.POS == "NOUN" and _more_frequent(p.normal_form, word)
+        and not BAD_TAGS & p.tag.grammemes
+        and float(vec @ engine._vector(p.normal_form)) >= FORM_MIN_SIM
+        for p in engine._morph().parse(word)
+    )
+
+
+def dim_bases(word: str) -> set[str]:
+    """Можливі основні слова для зменшувальної форми: "котик" -> {"кот", "кіт", ...}."""
+    out: set[str] = set()
+    for suf in DIM_SUFFIXES:
+        if not word.endswith(suf) or len(word) - len(suf) < 2:
+            continue
+        stem = word[:-len(suf)]
+        stems = {stem}
+        stems |= {stem[:-1] + b for a, b in DIM_ALTERNATIONS if stem.endswith(a)}
+        # о/е в закритому складі основи: кот-ик -> кіт, пес-ик -> пес
+        for st in list(stems):
+            for i in range(max(len(st) - 3, 0), len(st)):
+                if st[i] in "ое":
+                    stems.add(st[:i] + "і" + st[i + 1:])
+        # випадний голосний: пензл-ик -> пензель, корабл-ик -> корабель
+        if len(stem) >= 3:
+            stems |= {stem[:-1] + v + stem[-1] for v in "еоі"}
+        out |= {st + e for st in stems for e in DIM_ENDINGS}
+    out.discard(word)
+    return out
+
+
+def is_diminutive(word: str) -> bool:
+    """"чемоданчик", "котик": є відоме основне слово з близьким вектором."""
+    import engine
+
+    vec = engine._vector(word)
+    return any(
+        len(b) >= 3 and _more_frequent(b, word)
+        and float(vec @ engine._vector(b)) >= DIM_MIN_SIM
+        for b in dim_bases(word)
+    )
+
+
+def build_vocab() -> list[str]:
+    import engine
+
+    aliases = engine._aliases()
     vocab: list[str] = []
-    seen: set[str] = set()
-    for lem, tag in engine.lemmas(words):
-        if tag is None or lem in seen:  # None — слова немає у словнику pymorphy3
+    # data/words.txt — леми з векторами в частотному порядку
+    for w in (DATA / "words.txt").read_text(encoding="utf-8").splitlines():
+        if len(w) < 3 or w in aliases or w in NOISE_WORDS or not is_plain_noun(w):
             continue
-        if not is_content_lemma(lem):
+        if w not in KEEP_WORDS and (is_diminutive(w) or is_other_form(w)):
             continue
-        if len(lem) < 3 or not UK_RE.match(lem):
-            continue
-        seen.add(lem)
-        vocab.append(lem)
-    # друга перевірка: лема має лишатися собою, як її лематизує гра.
-    # Інакше ("сказала" -> "сказати") здогадка зведеться до іншого слова
-    # й отримає чужу позицію. І має мати вектор (data/words.txt),
-    # інакше гра його не знає
-    return [
-        w for w, (lem, _) in zip(vocab, engine.lemmas(vocab))
-        if lem == w and engine.is_known(w)
-    ]
+        vocab.append(w)
+        if len(vocab) >= VOCAB_SIZE:
+            break
+    return vocab
 
 
 def main() -> None:
-    DATA.mkdir(exist_ok=True)
-    ensure_freq_file()
-    words = clean_words()
-    print(f"Очищено слів: {len(words)}")
-
-    lemmas = lemmatize_vocab(words)
-    print(f"Унікальних лем: {len(lemmas)}")
-    vocab = lemmas[:VOCAB_SIZE]
+    vocab = build_vocab()
     (DATA / "vocab.txt").write_text("\n".join(vocab), encoding="utf-8")
     print(f"Словник для рейтингу: {len(vocab)} -> data/vocab.txt")
 

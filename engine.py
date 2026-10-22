@@ -106,6 +106,27 @@ def _vectors() -> tuple[dict[str, int], np.ndarray]:
     return {w: i for i, w in enumerate(words)}, matrix
 
 
+@lru_cache(maxsize=1)
+def _aliases() -> dict[str, str]:
+    """{похідне: основне} із data/aliases.txt: "чемоданчик" -> "чемодан"."""
+    pairs = {}
+    for line in (DATA / "aliases.txt").read_text(encoding="utf-8").splitlines():
+        if line.strip() and not line.startswith("#"):
+            a, b = line.split()
+            pairs[a] = b
+    # "пиріжки" -> "пиріжок" -> "пиріг"
+    for a, b in pairs.items():
+        while b in pairs:
+            b = pairs[b]
+        pairs[a] = b
+    return pairs
+
+
+def base_word(word: str) -> str:
+    """Основне слово для зменшувальної чи хибної форми, інакше саме слово."""
+    return _aliases().get(word, word)
+
+
 def is_known(word: str) -> bool:
     return word in _vectors()[0]
 
@@ -189,6 +210,8 @@ class Game:
             w.strip()
             for w in vocab_path.read_text(encoding="utf-8").splitlines()
             if w.strip() and w.strip() != self.secret and is_known(w.strip())
+            # "чемоданчик" не займає місця в рейтингу: це той самий "чемодан"
+            and w.strip() not in _aliases()
         ))
         self.vocab = vocab
         self._index = {w: i for i, w in enumerate(vocab)}
@@ -206,6 +229,7 @@ class Game:
         for v in _g_variants(w):
             candidates += [lemma(v), v]
         for c in candidates:
+            c = base_word(c)
             if c == self.secret or is_known(c):
                 return c
         return None

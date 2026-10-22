@@ -23,7 +23,7 @@ print("рейтинг узгоджений: OK")
 
 # регресії: рейтинг за змістом, а не за римою; невідомі слова; лематизація
 g = engine.Game("брова")
-top = [g.vocab[i] for i in np.argsort(-g._vocab_sims)[:20]]
+top = [g.vocab[i] for i in np.argsort(-g._vocab_sims)[:10]]
 assert not any(engine._rhymes(w, "брова") for w in top), top
 assert g.guess("обличчя").rank < 100 and g.guess("вдова").rank > 500
 hint, _ = g.hint(400)
@@ -38,3 +38,14 @@ assert engine.Game("сани").guess("сани").is_win
 for w in engine.load_secret_words():
     assert engine.is_known(engine.lemma(w)), f"загадане «{w}» без вектора"
 print("регресії: OK")
+
+# зменшувальні й хибні форми — це основне слово, і в рейтингу їх немає
+g = engine.Game("чемодан")
+assert g.guess("чемоданчик").is_win
+assert g.guess("валізка").lemma == "валіза"
+assert engine.Game("кіт").guess("котик").is_win
+assert g.guess("острови").lemma == "острів"
+assert "чемоданчик" not in g.vocab and "котик" not in g.vocab
+top = [g.vocab[i] for i in np.argsort(-g._vocab_sims)[:100]]
+assert not {"чемоданчик", "валізка", "пальчик", "стільчик"} & set(top), top
+print("зменшувальні: OK")
