@@ -177,6 +177,23 @@ def daily_secret(day: date | None = None, round_no: int = 0) -> str:
     return words[i]
 
 
+def pick_secret(key: str, history: list[str]) -> str:
+    """Слово для раунду key, якого ще не було в history (старі — першими).
+
+    daily_secret() дивився лише на свій день, і за кілька тижнів слова
+    почали повторюватись. Тепер обираємо з невживаних, а коли всі вже були,
+    — з тих, що грались найдавніше (поза останньою половиною списку).
+    """
+    words = load_secret_words()
+    used = set(history)
+    if all(w in used for w in words):
+        used = set(history[-(len(words) // 2):])
+    left = [w for w in words if w not in used]
+    salt = os.getenv("SECRET_SALT", "").encode()
+    h = hmac.new(salt, key.encode(), hashlib.sha256).hexdigest()
+    return left[int(h, 16) % len(left)]
+
+
 @dataclass
 class Guess:
     word: str          # як ввів гравець

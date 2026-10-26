@@ -75,11 +75,32 @@ def current() -> tuple[date, int, str]:
     return day, n, storage.round_key(day, n)
 
 
+def secret_for(day: date, n: int) -> str:
+    """Слово раунду: збережене в БД, а нове — з тих, яких ще не було."""
+    key = storage.round_key(day, n)
+    word = storage.get_secret(key)
+    if word is None:
+        word = storage.save_secret(
+            key, engine.pick_secret(key, storage.secret_history())
+        )
+    return word
+
+
+def remember_played_secrets() -> None:
+    """Записує слова раундів, зіграних до таблиці secrets (старим способом),
+    щоб нові раунди їх не повторювали, а поточний не змінився."""
+    for key in storage.played_rounds():
+        day, _, n = key.partition("#")
+        storage.save_secret(
+            key, engine.daily_secret(date.fromisoformat(day), int(n or 0))
+        )
+
+
 async def get_game(day: date, n: int) -> engine.Game:
     key = storage.round_key(day, n)
     async with _games_lock:
         if key not in _games:
-            secret = engine.daily_secret(day, n)
+            secret = secret_for(day, n)
             log.info("Будую гру на %s", key)
             game = await asyncio.to_thread(engine.Game, secret)
             # лишаємо попередній раунд: хтось ще міг дописувати в нього
@@ -307,6 +328,7 @@ def main() -> None:
             "/start, він покаже твій ID, і додай його в .env."
         )
     storage.init()
+    remember_played_secrets()
 
     app = Application.builder().token(TOKEN).post_init(_post_init).build()
     app.add_handler(TypeHandler(Update, guard), group=-1)

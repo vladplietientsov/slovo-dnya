@@ -49,6 +49,12 @@ SCHEMA = [
         day TEXT PRIMARY KEY,
         n   INTEGER NOT NULL
     )""",
+    # загадане слово кожного раунду: щоб не повторювати вже зіграні
+    """CREATE TABLE IF NOT EXISTS secrets (
+        day  TEXT PRIMARY KEY,
+        word TEXT NOT NULL,
+        ts   TEXT DEFAULT (datetime('now'))
+    )""",
 ]
 
 
@@ -160,6 +166,38 @@ def set_round(day: date, n: int) -> None:
         "ON CONFLICT(day) DO UPDATE SET n=excluded.n",
         (day.isoformat(), n),
     )
+
+
+def get_secret(rnd: str) -> str | None:
+    row = _one("SELECT word FROM secrets WHERE day=?", (rnd,))
+    return row["word"] if row else None
+
+
+def save_secret(rnd: str, word: str) -> str:
+    """Записує слово раунду, якщо його ще немає; повертає збережене."""
+    _query(
+        "INSERT INTO secrets(day, word) VALUES(?, ?) ON CONFLICT(day) DO NOTHING",
+        (rnd, word),
+    )
+    return get_secret(rnd)
+
+
+def secret_history() -> list[str]:
+    """Загадані слова від найдавнішого до найновішого."""
+    rows = _query("SELECT word FROM secrets ORDER BY ts, rowid")
+    return [r["word"] for r in rows]
+
+
+def played_rounds() -> list[str]:
+    """Ключі раундів, у які вже грали, але без запису в secrets."""
+    keys = {r["day"] for r in _query(
+        "SELECT day FROM guesses UNION SELECT day FROM results"
+    )}
+    for r in _query("SELECT day, n FROM rounds"):
+        d = date.fromisoformat(r["day"])
+        keys.update(round_key(d, k) for k in range(r["n"] + 1))
+    known = {r["day"] for r in _query("SELECT day FROM secrets")}
+    return sorted(keys - known, key=lambda k: (k[:10], int(k[11:] or 0)))
 
 
 def finished_count(rnd: str) -> int:

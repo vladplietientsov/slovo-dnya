@@ -71,4 +71,24 @@ assert 2 <= r <= 200
 import bot
 print("bot.today():", bot.today())
 
+# уже зіграні раунди зберігають своє слово, а нові його не повторюють
+assert storage.played_rounds() == [yd, td, r1], storage.played_rounds()
+bot.remember_played_secrets()
+assert storage.played_rounds() == []
+assert storage.get_secret(td) == engine.daily_secret(td_date)
+assert storage.get_secret(r1) == engine.daily_secret(td_date, 1)
+assert bot.secret_for(td_date, 0) == engine.daily_secret(td_date)
+
+# цілий список слів без жодного повтору, далі — лише найдавніші
+all_words = engine.load_secret_words()
+start = td_date + timedelta(days=1)
+for k in range(len(all_words) - 3):
+    bot.secret_for(start + timedelta(days=k), 0)
+old, new = storage.secret_history()[:3], storage.secret_history()[3:]
+assert len(new) == len(set(new)) and not set(old) & set(new)
+for k in range(len(all_words), len(all_words) + 20):
+    w = bot.secret_for(start + timedelta(days=k), 0)
+    assert w not in storage.secret_history()[-len(all_words) // 2 - 1:-1], w
+print("слова не повторюються: OK")
+
 print("\n✅ Усі перевірки пройдено")
