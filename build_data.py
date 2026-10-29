@@ -1,7 +1,7 @@
 """Готує словник для рейтингу з частотних лем fastText (data/words.txt).
 
 Створює:
-  data/vocab.txt - словник для рейтингу: найчастіші іменники, без
+  data/vocab.txt - словник для рейтингу: усі іменники, без
                    зменшувальних форм ("чемоданчик") і хибних лем ("острови")
 
 Рейтинг будуємо лише з іменників: загадані слова — іменники, і поруч мають
@@ -20,9 +20,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent
 DATA = ROOT / "data"
-
-# скільки іменників беремо у словник для рейтингу
-VOCAB_SIZE = 12000
 
 # українські літери + апостроф
 UK_RE = re.compile(r"^[абвгґдеєжзиіїйклмнопрстуфхцчшщьюя'’]+$")
@@ -157,9 +154,9 @@ def build_vocab() -> list[str]:
             continue
         if w not in KEEP_WORDS and (is_diminutive(w) or is_other_form(w)):
             continue
+        # беремо всі іменники, а не лише найчастіші: рідкісне слово поза
+        # рейтингом ("обгортка") ділило б позицію з сусіднім словом рейтингу
         vocab.append(w)
-        if len(vocab) >= VOCAB_SIZE:
-            break
     return vocab
 
 

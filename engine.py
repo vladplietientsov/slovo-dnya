@@ -200,6 +200,13 @@ class Guess:
     lemma: str         # початкова форма
     rank: int          # позиція (1 = вгадано)
     similarity: float  # косинусна схожість [-1, 1]
+    # False — слова немає в рейтингу (не іменник): позиція лише приблизна,
+    # бо слово стоїть між двома словами рейтингу й ділить позицію з одним із них
+    exact: bool = True
+
+    @property
+    def rank_text(self) -> str:
+        return str(self.rank) if self.exact else f"≈{self.rank}"
 
     @property
     def emoji(self) -> str:
@@ -263,11 +270,20 @@ class Game:
             # беремо вже пораховане число: окремий розрахунок відрізняється
             # в останніх знаках, і слово могло "обігнати саме себе"
             sim = float(self._vocab_sims[idx])
+            # однакова схожість — порядок словника, щоб позиції не збігались
+            ties = int(np.sum(self._vocab_sims[:idx] == sim))
         else:
             sim = float(_vector(lem) @ self._secret_vec)
+            ties = 0
         # +2: 1 — саме загадане слово, 1 — переводимо кількість ближчих у позицію
-        rank = int(np.sum(self._vocab_sims > sim)) + 2
-        return Guess(word=word, lemma=lem, rank=rank, similarity=sim)
+        rank = int(np.sum(self._vocab_sims > sim)) + ties + 2
+        return Guess(word=word, lemma=lem, rank=rank, similarity=sim,
+                     exact=idx is not None)
+
+    def rank_text(self, lemma: str, rank: int) -> str:
+        """Позиція збереженої здогадки: "≈" для слів поза рейтингом."""
+        exact = rank == 1 or lemma in self._index
+        return str(rank) if exact else f"≈{rank}"
 
     @property
     def vocab_size(self) -> int:
