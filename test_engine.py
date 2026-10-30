@@ -49,13 +49,3 @@ assert "чемоданчик" not in g.vocab and "котик" not in g.vocab
 top = [g.vocab[i] for i in np.argsort(-g._vocab_sims)[:100]]
 assert not {"чемоданчик", "валізка", "пальчик", "стільчик"} & set(top), top
 print("зменшувальні: OK")
-
-# кожне слово рейтингу має свою позицію; рідкісні іменники теж у рейтингу
-g = engine.Game("цукерка")
-ranks = [g.guess(w).rank for w in ["попільничка", "пачка", "обгортка"]]
-assert len(set(ranks)) == 3, ranks
-assert all(g.guess(w).exact for w in ["попільничка", "обгортка"])
-nonnoun = g.guess("солодкий")
-assert not nonnoun.exact and nonnoun.rank_text.startswith("≈"), nonnoun
-assert g.rank_text("пачка", 5) == "5" and g.rank_text("солодкий", 5) == "≈5"
-print("унікальні позиції: OK")

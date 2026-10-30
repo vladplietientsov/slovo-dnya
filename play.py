@@ -71,11 +71,11 @@ def main() -> None:
         note = ""
         if g.lemma != raw.lower():
             note = f" (як «{g.lemma}»)"
-        print(f"{g.emoji}  {raw}{note}: позиція {g.rank_text}")
+        print(f"{g.emoji}  {raw}{note}: позиція {g.rank}")
 
         # топ-3 найкращі здогадки для орієнтиру
         best = sorted(history, key=lambda x: x.rank)[:3]
-        tops = "  ".join(f"{b.lemma}={b.rank_text}" for b in best)
+        tops = "  ".join(f"{b.lemma}={b.rank}" for b in best)
         print(f"    найкращі: {tops}")
 
 

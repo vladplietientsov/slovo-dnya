@@ -276,9 +276,7 @@ async def on_guess(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     prev = storage.already_guessed_lemma(uid, rnd, g.lemma)
     if prev is not None:
-        await update.message.reply_text(
-            f"«{g.lemma}» уже було — позиція {game.rank_text(g.lemma, prev)}."
-        )
+        await update.message.reply_text(f"«{g.lemma}» уже було — позиція {prev}.")
         return
 
     storage.record_guess(uid, rnd, text, g.lemma, g.rank)
@@ -298,9 +296,9 @@ async def on_guess(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     note = f" (як «{html.escape(g.lemma)}»)" if g.lemma != text.lower() else ""
     guesses = storage.get_day_guesses(uid, rnd)
-    best = "  ".join(f"{html.escape(w)}={game.rank_text(w, r)}" for w, r in guesses[:3])
+    best = "  ".join(f"{html.escape(w)}={r}" for w, r in guesses[:3])
     await update.message.reply_html(
-        f"{g.emoji} <b>{html.escape(text)}</b>{note}: позиція {g.rank_text}\n"
+        f"{g.emoji} <b>{html.escape(text)}</b>{note}: позиція {g.rank}\n"
         f"<i>найкращі:</i> {best}"
     )
 
