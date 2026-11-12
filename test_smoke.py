@@ -67,9 +67,44 @@ print("hint(200):", g.hint(200))
 w, r = g.hint(200)
 assert 2 <= r <= 200
 
+# підказка — не спроба: у лік не йде, але видно серед слів гравця
+storage.remember_user(3, "Тест")
+storage.record_guess(3, td, "стіл", "стіл", 900)
+storage.record_guess(3, td, "зір", "зір", 3, hint=True)
+storage.record_guess(3, td, "вухо", "вухо", 40)
+assert storage.attempts_count(3, td) == 2 and storage.hints_count(3, td) == 1
+assert storage.last_rank(3, td) == 40
+assert storage.get_round_guesses(3, td) == [
+    ("зір", 3, True), ("вухо", 40, False), ("стіл", 900, False)]
+storage._query("DELETE FROM guesses WHERE user_id=3")
+storage._query("DELETE FROM users WHERE user_id=3")
+
+# стара база без колонки hint оновлюється сама
+old_db = storage.DB_PATH
+storage.DB_PATH = old_db.with_name("old.db")
+storage._query("CREATE TABLE guesses (user_id INTEGER, day TEXT, word TEXT, "
+               "lemma TEXT, rank INTEGER, ts TEXT)")
+storage._query("INSERT INTO guesses VALUES (1, 'd', 'кіт', 'кіт', 5, '')")
+storage.init()
+assert storage.get_round_guesses(1, "d") == [("кіт", 5, False)]
+storage.DB_PATH = old_db
+
 # імпорт бота не має падати без токена
 import bot
 print("bot.today():", bot.today())
+
+# вигляд повідомлень
+assert bot.bar(2, 12000) == "▰" * 9 + "▱" and bot.bar(12000, 12000) == "▱" * 10
+assert bot.trend(40, 900) == "  ⬆️ тепліше" and bot.trend(900, 40) == "  ⬇️ холодніше"
+assert bot.trend(5, None) == ""
+assert [bot.attempts_word(k) for k in (1, 2, 5, 11, 21, 22)] == [
+    "1 спроба", "2 спроби", "5 спроб", "11 спроб", "21 спроба", "22 спроби"]
+share = bot.share_block(date(2026, 11, 12), 0,
+                        [("око", 1, False), ("зір", 3, True), ("вухо", 5, False),
+                         ("ніс", 40, False), ("стіл", 900, False)], solved=True)
+print(share)
+assert share == "Слово дня 12.11 — 4 спроби, підказок: 1\n🔥1  🟢1  🟡1"
+assert "око" not in share.split("—")[1]
 
 # уже зіграні раунди зберігають своє слово, а нові його не повторюють
 assert storage.played_rounds() == [yd, td, r1], storage.played_rounds()

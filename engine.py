@@ -29,8 +29,23 @@ DATA = ROOT / "data"
 MODEL = "uk_core_news_md"
 
 # пороги для кольорів за позицією
+HOT = 10
 GREEN = 100
 YELLOW = 1000
+
+# Рейтинг = суміш двох схожостей (див. Game._scores):
+#   W_BASE  - вектор слова проти вектора загаданого;
+#   W_ASSOC - вектор слова проти асоціацій із data/associations.txt.
+W_BASE = 0.55
+W_ASSOC = 0.45
+# скільки найближчих асоціацій усереднюємо для одного слова
+ASSOC_TOP = 3
+# надбавка самим асоціаціям: перша у списку — найбільша, остання — найменша
+ASSOC_BONUS = (0.16, 0.06)
+# штраф слову, що лише римується із загаданим ("ковадло" / "повидло")
+RHYME_PENALTY = 0.05
+# з якої позиції починається перша підказка, коли здогадок ще немає
+FIRST_HINT = 150
 
 
 @lru_cache(maxsize=1)
@@ -141,6 +156,35 @@ def _g_variants(word: str) -> list[str]:
     return [word[:i] + "ґ" + word[i + 1:] for i, c in enumerate(word) if c == "г"]
 
 
+@lru_cache(maxsize=1)
+def _associations() -> dict[str, list[str]]:
+    """{загадане: [асоціації, найближча перша]} із data/associations.txt."""
+    out: dict[str, list[str]] = {}
+    path = DATA / "associations.txt"
+    if not path.exists():
+        return out
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        key, _, rest = line.partition(":")
+        out[_norm(key)] = [_norm(w) for w in rest.split()]
+    return out
+
+
+def anchors_for(secret: str) -> list[str]:
+    """Асоціації до слова у формах, які знає гра, без повторів."""
+    raw = _associations().get(secret, [])
+    if not raw:
+        return []
+    out: list[str] = []
+    for w, (lem, _) in zip(raw, lemmas(raw)):
+        # слово як є важливіше за лему: "ковзани" pymorphy3 зводить до "ковзан"
+        w = next((base_word(c) for c in (w, lem) if is_known(base_word(c))), None)
+        if w and w != secret and w not in out:
+            out.append(w)
+    return out
+
+
 def _rhymes(a: str, b: str) -> bool:
     """Спільне закінчення з 3 літер: "брова" / "корова"."""
     return len(a) >= 3 and len(b) >= 3 and a[-3:] == b[-3:]
@@ -203,23 +247,52 @@ class Guess:
 
     @property
     def emoji(self) -> str:
-        if self.rank == 1:
-            return "🐞"
-        if self.rank <= GREEN:
-            return "🟢"
-        if self.rank <= YELLOW:
-            return "🟡"
-        return "🔴"
+        return rank_emoji(self.rank)
 
     @property
     def is_win(self) -> bool:
         return self.rank == 1
 
 
+def rank_emoji(rank: int) -> str:
+    if rank == 1:
+        return "🐞"
+    if rank <= HOT:
+        return "🔥"
+    if rank <= GREEN:
+        return "🟢"
+    if rank <= YELLOW:
+        return "🟡"
+    return "🔴"
+
+
 class Game:
+    """Рейтинг усіх слів словника відносно одного загаданого слова.
+
+    Оцінка слова — суміш двох схожостей:
+      * з вектором самого загаданого слова (fastText): знаходить слова того
+        самого типу — "лікар" -> "хірург", "терапевт";
+      * з асоціаціями з data/associations.txt: знаходить пов'язані за змістом
+        — "брова" -> "око", "вія", "лоб", яких вектори поруч не ставлять.
+    Самі асоціації отримують надбавку, тож стоять у верхній частині рейтингу.
+    Слова без списку асоціацій ранжуються лише за вектором, як раніше.
+    """
+
     def __init__(self, secret: str, vocab_path: Path | None = None):
         self.secret = lemma(secret)
+        if not is_known(self.secret) and is_known(_norm(secret)):
+            self.secret = _norm(secret)
         self._secret_vec = _vector(self.secret)
+
+        self.anchors = anchors_for(self.secret)
+        n = len(self.anchors)
+        lo, hi = ASSOC_BONUS[1], ASSOC_BONUS[0]
+        self._bonus = {
+            w: hi - (hi - lo) * i / max(1, n - 1) for i, w in enumerate(self.anchors)
+        }
+        self._anchor_mat = (
+            np.vstack([_vector(w) for w in self.anchors]) if n else None
+        )
 
         vocab_path = vocab_path or (DATA / "vocab.txt")
         # dict.fromkeys — прибирає дублікати, зберігаючи порядок
@@ -230,13 +303,33 @@ class Game:
             # "чемоданчик" не займає місця в рейтингу: це той самий "чемодан"
             and w.strip() not in _aliases()
         ))
+        # асоціації поза частотним словником теж мають місце в рейтингу
+        vocab += [w for w in self.anchors if w not in set(vocab)]
         self.vocab = vocab
         self._index = {w: i for i, w in enumerate(vocab)}
 
         index, vectors = _vectors()
         matrix = vectors[[index[w] for w in vocab]].astype(np.float32)
-        # схожість кожного слова словника із загаданим
-        self._vocab_sims = matrix @ self._secret_vec
+        self._vocab_sims = self._scores(vocab, matrix)
+        # слова від найближчого до найдальшого
+        self._order = np.argsort(-self._vocab_sims, kind="stable")
+
+    def _scores(self, words: list[str], matrix: np.ndarray) -> np.ndarray:
+        """Оцінка близькості кожного слова до загаданого (більше — ближче)."""
+        base = matrix @ self._secret_vec
+        if self._anchor_mat is None:
+            return base
+        sims = matrix @ self._anchor_mat.T
+        k = min(ASSOC_TOP, sims.shape[1])
+        # середнє з k найближчих асоціацій: слово має бути поруч із кількома
+        assoc = np.sort(sims, axis=1)[:, -k:].mean(axis=1)
+        score = W_BASE * base + W_ASSOC * assoc
+        for i, w in enumerate(words):
+            if w in self._bonus:
+                score[i] += self._bonus[w]
+            elif _rhymes(w, self.secret):
+                score[i] -= RHYME_PENALTY
+        return score
 
     def resolve(self, word: str) -> str | None:
         """Лема здогадки, яку знає гра, або None ("теремоек")."""
@@ -264,7 +357,7 @@ class Game:
             # в останніх знаках, і слово могло "обігнати саме себе"
             sim = float(self._vocab_sims[idx])
         else:
-            sim = float(_vector(lem) @ self._secret_vec)
+            sim = float(self._scores([lem], _vector(lem)[None, :])[0])
         # +2: 1 — саме загадане слово, 1 — переводимо кількість ближчих у позицію
         rank = int(np.sum(self._vocab_sims > sim)) + 2
         return Guess(word=word, lemma=lem, rank=rank, similarity=sim)
@@ -273,20 +366,34 @@ class Game:
     def vocab_size(self) -> int:
         return len(self.vocab) + 1
 
-    def hint(self, best_rank: int | None) -> tuple[str, int]:
+    def top(self, n: int = 10) -> list[str]:
+        """n найближчих слів (позиції 2, 3, ...) — показуємо після гри."""
+        return [self.vocab[i] for i in self._order[:n]]
+
+    def word_at(self, rank: int) -> str:
+        """Слово на позиції rank (2 — найближче до загаданого)."""
+        return self.vocab[self._order[rank - 2]]
+
+    def hint(self, best_rank: int | None,
+             guessed: set[str] | frozenset[str] = frozenset()) -> tuple[str, int] | None:
         """Слово, ближче за найкращу здогадку гравця (але не відповідь).
 
-        Пропускає слова, що римуються із загаданим: вони не допомагають.
+        Ціль — удвічі ближче за найкращу позицію. Слова, які гравець уже
+        називав, і ті, що римуються із загаданим, пропускаємо. None — ближче
+        вже нікуди: найкраща здогадка стоїть одразу за відповіддю.
         """
-        if best_rank is None or best_rank <= 3:
-            target = 50
-        else:
-            target = max(2, best_rank // 2)
-        order = np.argsort(-self._vocab_sims)
-        start = max(0, min(len(self.vocab) - 1, target - 2))
-        # спершу шукаємо ближче до відповіді, потім далі
-        for idx in [*range(start, -1, -1), *range(start + 1, len(order))]:
-            w = self.vocab[order[idx]]
-            if not _rhymes(w, self.secret):
-                return w, idx + 2
-        return self.vocab[order[start]], start + 2
+        limit = len(self.vocab) + 2 if best_rank is None else best_rank
+        target = FIRST_HINT if best_rank is None else max(2, best_rank // 2)
+        target = min(target, limit - 1)
+
+        def ok(rank: int) -> bool:
+            w = self.word_at(rank)
+            return w not in guessed and (
+                w in self._bonus or not _rhymes(w, self.secret)
+            )
+
+        # спершу від цілі в бік відповіді, потім — назад до найкращої здогадки
+        for rank in [*range(target, 1, -1), *range(target + 1, limit)]:
+            if ok(rank):
+                return self.word_at(rank), rank
+        return None

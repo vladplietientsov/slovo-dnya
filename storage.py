@@ -34,7 +34,8 @@ SCHEMA = [
         word    TEXT    NOT NULL,
         lemma   TEXT    NOT NULL,
         rank    INTEGER NOT NULL,
-        ts      TEXT DEFAULT (datetime('now'))
+        ts      TEXT DEFAULT (datetime('now')),
+        hint    INTEGER NOT NULL DEFAULT 0
     )""",
     """CREATE TABLE IF NOT EXISTS results (
         user_id  INTEGER NOT NULL,
@@ -149,6 +150,11 @@ def _one(sql: str, params: tuple = ()) -> dict | None:
 def init() -> None:
     for stmt in SCHEMA:
         _query(stmt)
+    # бази, створені до появи підказок-здогадок, не мають колонки hint
+    try:
+        _query("SELECT hint FROM guesses LIMIT 1")
+    except Exception:
+        _query("ALTER TABLE guesses ADD COLUMN hint INTEGER NOT NULL DEFAULT 0")
 
 
 def round_key(day: date, n: int) -> str:
@@ -217,11 +223,43 @@ def remember_user(user_id: int, name: str) -> None:
     )
 
 
-def record_guess(user_id: int, rnd: str, word: str, lemma: str, rank: int) -> None:
+def record_guess(user_id: int, rnd: str, word: str, lemma: str, rank: int,
+                 hint: bool = False) -> None:
+    """hint=True — слово підказав бот: воно видно серед найкращих, але
+    спробою гравця не рахується."""
     _query(
-        "INSERT INTO guesses(user_id, day, word, lemma, rank) VALUES(?, ?, ?, ?, ?)",
-        (user_id, rnd, word, lemma, rank),
+        "INSERT INTO guesses(user_id, day, word, lemma, rank, hint) "
+        "VALUES(?, ?, ?, ?, ?, ?)",
+        (user_id, rnd, word, lemma, rank, int(hint)),
     )
+
+
+def last_rank(user_id: int, rnd: str) -> int | None:
+    """Позиція попередньої власної здогадки гравця — для "тепліше/холодніше"."""
+    row = _one(
+        "SELECT rank FROM guesses WHERE user_id=? AND day=? AND hint=0 "
+        "ORDER BY rowid DESC LIMIT 1",
+        (user_id, rnd),
+    )
+    return row["rank"] if row else None
+
+
+def get_round_guesses(user_id: int, rnd: str) -> list[tuple[str, int, bool]]:
+    """(лема, позиція, чи це підказка) — від найближчого слова."""
+    rows = _query(
+        "SELECT lemma, rank, hint FROM guesses WHERE user_id=? AND day=? "
+        "ORDER BY rank",
+        (user_id, rnd),
+    )
+    return [(r["lemma"], r["rank"], bool(r["hint"])) for r in rows]
+
+
+def hints_count(user_id: int, rnd: str) -> int:
+    row = _one(
+        "SELECT COUNT(*) n FROM guesses WHERE user_id=? AND day=? AND hint=1",
+        (user_id, rnd),
+    )
+    return row["n"]
 
 
 def already_guessed_lemma(user_id: int, rnd: str, lemma: str) -> int | None:
@@ -243,7 +281,7 @@ def get_day_guesses(user_id: int, rnd: str) -> list[tuple[str, int]]:
 
 def attempts_count(user_id: int, rnd: str) -> int:
     row = _one(
-        "SELECT COUNT(*) n FROM guesses WHERE user_id=? AND day=?",
+        "SELECT COUNT(*) n FROM guesses WHERE user_id=? AND day=? AND hint=0",
         (user_id, rnd),
     )
     return row["n"]

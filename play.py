@@ -37,7 +37,7 @@ def main() -> None:
     print(f"Словник для рейтингу: {game.vocab_size} слів.")
     print("Вгадай загадане слово. Пиши слово й тисни Enter.")
     print("Позиція 1 — вгадав. Чим менше число — тим ближче.")
-    print("🟢 ≤100   🟡 ≤1000   🔴 далі")
+    print("🔥 ≤10   🟢 ≤100   🟡 ≤1000   🔴 далі")
     print("Команди: /здатися, /вихід\n")
 
     attempts = 0
@@ -55,6 +55,7 @@ def main() -> None:
             return
         if raw in ("/здатися", "/surrender"):
             print(f"Загадане слово було: {game.secret}")
+            print("Найближчі слова:", ", ".join(game.top(10)))
             return
 
         g = game.guess(raw)
@@ -66,6 +67,7 @@ def main() -> None:
 
         if g.is_win:
             print(f"{g.emoji}  {g.lemma} — ВГАДАВ! Спроб: {attempts}")
+            print("Найближчі слова:", ", ".join(game.top(10)))
             return
 
         note = ""

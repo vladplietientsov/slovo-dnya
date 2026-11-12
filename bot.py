@@ -129,6 +129,102 @@ async def guard(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     raise ApplicationHandlerStop
 
 
+# ---------------------------------------------------------------- вигляд
+
+BAR_LEN = 10
+# скільки найкращих слів показуємо після кожної здогадки
+BEST_SHOWN = 5
+TOP_SHOWN = 10
+
+
+def bar(rank: int, total: int) -> str:
+    """Смужка близькості: позиція 2 — повна, остання у словнику — порожня.
+
+    Шкала логарифмічна: різниця між 5 і 50 важить більше, ніж між 5000 і 5050.
+    """
+    import math
+
+    closeness = 1 - math.log(max(rank, 1)) / math.log(max(total, 2))
+    filled = max(0, min(BAR_LEN, round(closeness * BAR_LEN)))
+    return "▰" * filled + "▱" * (BAR_LEN - filled)
+
+
+def trend(rank: int, prev: int | None) -> str:
+    """Порівняння з попередньою здогадкою гравця."""
+    if prev is None or rank == prev:
+        return ""
+    return "  ⬆️ тепліше" if rank < prev else "  ⬇️ холодніше"
+
+
+def attempts_word(n: int) -> str:
+    if n % 10 == 1 and n % 100 != 11:
+        return f"{n} спроба"
+    if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
+        return f"{n} спроби"
+    return f"{n} спроб"
+
+
+def best_lines(guesses: list[tuple[str, int, bool]], total: int,
+               mark: str | None = None) -> str:
+    """Найкращі слова гравця стовпчиком; 💡 — слово з підказки."""
+    lines = []
+    for lem, rank, is_hint in guesses[:BEST_SHOWN]:
+        name = html.escape(lem) + (" 💡" if is_hint else "")
+        if lem == mark:
+            name = f"<b>{name}</b>"
+        lines.append(f"{engine.rank_emoji(rank)} {bar(rank, total)} {rank} · {name}")
+    return "\n".join(lines)
+
+
+def spoiler(update: Update, text: str) -> str:
+    """У групі ховаємо відповідь під спойлер: інший гравець ще може грати."""
+    if update.effective_chat.type == "private":
+        return text
+    return f"<tg-spoiler>{text}</tg-spoiler>"
+
+
+def top_block(game: engine.Game, guessed: set[str]) -> str:
+    """Найближчі до загаданого слова; ✅ — ті, що гравець називав сам."""
+    lines = [
+        f"{i}. {html.escape(w)}" + (" ✅" if w in guessed else "")
+        for i, w in enumerate(game.top(TOP_SHOWN), start=2)
+    ]
+    return "\n".join(lines)
+
+
+def share_block(day: date, n: int, guesses: list[tuple[str, int, bool]],
+                solved: bool) -> str:
+    """Підсумок без спойлерів — його можна переслати."""
+    own = [r for _, r, h in guesses if not h]
+    hints = sum(1 for _, _, h in guesses if h)
+    tiers = [
+        ("🔥", sum(1 for r in own if 1 < r <= engine.HOT)),
+        ("🟢", sum(1 for r in own if engine.HOT < r <= engine.GREEN)),
+        ("🟡", sum(1 for r in own if engine.GREEN < r <= engine.YELLOW)),
+        ("🔴", sum(1 for r in own if r > engine.YELLOW)),
+    ]
+    title = f"Слово дня {day:%d.%m}" + (f", раунд {n + 1}" if n else "")
+    result = attempts_word(len(own)) if solved else "здався"
+    if hints:
+        result += f", підказок: {hints}"
+    return (
+        f"{title} — {result}\n"
+        + "  ".join(f"{e}{c}" for e, c in tiers if c)
+    ).strip()
+
+
+def finish_text(update: Update, game: engine.Game, day: date, n: int,
+                guesses: list[tuple[str, int, bool]], solved: bool) -> str:
+    guessed = {lem for lem, _, h in guesses if not h}
+    return (
+        "\n\n<b>Найближчі слова</b>\n"
+        + spoiler(update, top_block(game, guessed))
+        + "\n\n<b>Результат для друзів</b>\n<code>"
+        + html.escape(share_block(day, n, guesses, solved))
+        + "</code>"
+    )
+
+
 # ---------------------------------------------------------------- команди
 
 WELCOME = (
@@ -136,9 +232,11 @@ WELCOME = (
     "Щодня одне спільне слово. Пиши будь-яке слово — я скажу, "
     "наскільки воно близьке за змістом.\n"
     "Позиція <b>1</b> — слово вгадано. Чим менше число — тим ближче.\n"
-    "🟢 ≤100   🟡 ≤1000   🔴 далі\n\n"
+    "🔥 ≤10   🟢 ≤100   🟡 ≤1000   🔴 далі\n\n"
     "Команди:\n"
-    "/hint — підказка\n"
+    "/hint — підказка: слово, ближче за твоє найкраще\n"
+    "/words — усі мої слова в цьому раунді\n"
+    "/top — найближчі слова (після завершення раунду)\n"
     "/stats — статистика й таблиця\n"
     "/newword — нове слово, коли двоє вже вгадали чи здались\n"
     "/giveup — здатися й дізнатися слово\n"
@@ -164,9 +262,9 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     medals = ["🥇", "🥈", "🥉"]
     for i, s in enumerate(board):
         medal = medals[i] if i < len(medals) else "  "
-        best = f", краще {s.best_attempts} спроб" if s.best_attempts else ""
+        best = f", рекорд {attempts_word(s.best_attempts)}" if s.best_attempts else ""
         lines.append(
-            f"{medal} <b>{html.escape(s.name)}</b>: {s.wins} перемог, "
+            f"{medal} <b>{html.escape(s.name)}</b>: перемог {s.wins} з {s.played}, "
             f"серія {s.streak}🔥{best}"
         )
     await update.message.reply_html("\n".join(lines))
@@ -180,12 +278,63 @@ async def cmd_hint(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Ця гра вже завершена 🙂 Чекай нове слово.")
         return
     await ctx.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
+    storage.remember_user(uid, player_name(update))
     game = await get_game(day, n)
-    guesses = storage.get_day_guesses(uid, rnd)
+    guesses = storage.get_round_guesses(uid, rnd)
     best_rank = guesses[0][1] if guesses else None
-    word, rank = game.hint(best_rank)
+    hint = game.hint(best_rank, {lem for lem, _, _ in guesses})
+    if hint is None:
+        await update.message.reply_html(
+            f"💡 Ближче вже нікуди: «{html.escape(guesses[0][0])}» стоїть одразу "
+            "за відповіддю. Подумай, що з ним найтісніше пов'язане."
+        )
+        return
+    word, rank = hint
+    # підказка стає словом гравця: наступна буде ще ближчою
+    storage.record_guess(uid, rnd, word, word, rank, hint=True)
+    guesses = storage.get_round_guesses(uid, rnd)
     await update.message.reply_html(
-        f"💡 Підказка: спробуй асоціації до <b>«{html.escape(word)}»</b> (це слово на позиції {rank})."
+        f"💡 Підказка: <b>{html.escape(word)}</b> · позиція {rank}\n\n"
+        + best_lines(guesses, game.vocab_size, mark=word)
+    )
+
+
+async def cmd_words(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = update.effective_user.id
+    day, n, rnd = current()
+    guesses = storage.get_round_guesses(uid, rnd)
+    if not guesses:
+        await update.message.reply_text("У цьому раунді ще немає слів. Напиши перше!")
+        return
+    shown = guesses[:40]
+    lines = [
+        f"{engine.rank_emoji(r)} {r} · {html.escape(lem)}" + (" 💡" if h else "")
+        for lem, r, h in shown
+    ]
+    more = f"\n…і ще {len(guesses) - len(shown)}" if len(guesses) > len(shown) else ""
+    own = sum(1 for _, _, h in guesses if not h)
+    await update.message.reply_html(
+        f"📝 <b>Мої слова</b> ({attempts_word(own)})\n"
+        + spoiler(update, "\n".join(lines)) + more
+    )
+
+
+async def cmd_top(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = update.effective_user.id
+    day, n, rnd = current()
+    res = storage.get_result(uid, rnd)
+    if not res or not (res["solved"] or res["gave_up"]):
+        await update.message.reply_text(
+            "Найближчі слова відкриються, коли вгадаєш слово або здасися 🙂"
+        )
+        return
+    game = await get_game(day, n)
+    guesses = storage.get_round_guesses(uid, rnd)
+    guessed = {lem for lem, _, h in guesses if not h}
+    await update.message.reply_html(
+        "<b>Найближчі слова до «"
+        + spoiler(update, html.escape(game.secret)) + "»</b>\n"
+        + spoiler(update, top_block(game, guessed))
     )
 
 
@@ -196,15 +345,23 @@ async def cmd_giveup(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if res and res["solved"]:
         await update.message.reply_text("Це слово вже вгадано 🐞")
         return
+    if res and res["gave_up"]:
+        await update.message.reply_text("Ти вже здався в цьому раунді. /top покаже найближчі слова.")
+        return
     game = await get_game(day, n)
+    storage.remember_user(uid, player_name(update))
     storage.set_result(
         uid, rnd, solved=False, gave_up=True,
         attempts=storage.attempts_count(uid, rnd),
     )
-    await update.message.reply_html(
-        f"Загадане слово було: <b>{html.escape(game.secret)}</b>. "
-        "Нове слово — завтра або через /newword, коли двоє завершать 🎯"
+    guesses = storage.get_round_guesses(uid, rnd)
+    msg = (
+        "Загадане слово було: "
+        + spoiler(update, f"<b>{html.escape(game.secret)}</b>")
+        + finish_text(update, game, day, n, guesses, solved=False)
+        + "\n\nНове слово — завтра або через /newword, коли двоє завершать 🎯"
     )
+    await update.message.reply_html(msg)
 
 
 async def cmd_newword(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -257,8 +414,8 @@ async def on_guess(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     res = storage.get_result(uid, rnd)
     if res and res["solved"]:
         await update.message.reply_text(
-            f"Це слово вже вгадано за {res['attempts']} спроб 🐞 "
-            "Чекай нове слово або /newword."
+            f"Це слово вже вгадано ({attempts_word(res['attempts'])}) 🐞 "
+            "Чекай нове слово або /newword. /top покаже найближчі слова."
         )
         return
     if res and res["gave_up"]:
@@ -271,35 +428,42 @@ async def on_guess(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     game = await get_game(day, n)
     g = game.guess(text)
     if g is None:
-        await update.message.reply_text(f"Не знаю слова «{text}» 🤔 Спробу не зараховано.")
+        await update.message.reply_text(
+            f"Не знаю слова «{text}» 🤔 Спробу не зараховано. "
+            "Перевір написання або спробуй інше слово."
+        )
         return
 
     prev = storage.already_guessed_lemma(uid, rnd, g.lemma)
-    if prev is not None:
+    if prev is not None and not g.is_win:
         await update.message.reply_text(f"«{g.lemma}» уже було — позиція {prev}.")
         return
 
+    last = storage.last_rank(uid, rnd)
     storage.record_guess(uid, rnd, text, g.lemma, g.rank)
+    guesses = storage.get_round_guesses(uid, rnd)
 
     if g.is_win:
         attempts = storage.attempts_count(uid, rnd)
+        hints = storage.hints_count(uid, rnd)
         storage.set_result(uid, rnd, solved=True, gave_up=False, attempts=attempts)
         stats = storage.get_stats(uid, day)
+        used = f" · підказок: {hints}" if hints else ""
         msg = (
-            f"{g.emoji} <b>{html.escape(g.lemma)}</b> — Вгадано! 🐞\n"
-            f"Спроб: {attempts}. Серія: {stats.streak}🔥"
+            f"🐞 {spoiler(update, '<b>' + html.escape(g.lemma) + '</b>')} — вгадано!\n"
+            f"{attempts_word(attempts).capitalize()}{used} · серія {stats.streak}🔥"
+            + finish_text(update, game, day, n, guesses, solved=True)
         )
         if storage.finished_count(rnd) >= FINISHED_FOR_NEW_ROUND:
-            msg += "\nДвоє вже завершили це слово — /newword відкриє нове."
+            msg += "\n\nДвоє вже завершили це слово — /newword відкриє нове."
         await update.message.reply_html(msg)
         return
 
     note = f" (як «{html.escape(g.lemma)}»)" if g.lemma != text.lower() else ""
-    guesses = storage.get_day_guesses(uid, rnd)
-    best = "  ".join(f"{html.escape(w)}={r}" for w, r in guesses[:3])
     await update.message.reply_html(
-        f"{g.emoji} <b>{html.escape(text)}</b>{note}: позиція {g.rank}\n"
-        f"<i>найкращі:</i> {best}"
+        f"{g.emoji} <b>{html.escape(text)}</b>{note} · позиція {g.rank}"
+        f"{trend(g.rank, last)}\n\n"
+        + best_lines(guesses, game.vocab_size, mark=g.lemma)
     )
 
 
@@ -336,6 +500,8 @@ def main() -> None:
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("hint", cmd_hint))
+    app.add_handler(CommandHandler("words", cmd_words))
+    app.add_handler(CommandHandler("top", cmd_top))
     app.add_handler(CommandHandler("giveup", cmd_giveup))
     app.add_handler(CommandHandler("newword", cmd_newword))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_guess))
